@@ -17,8 +17,9 @@ DEBUGOPT := -O0 -g3
 INC      := -Iinclude
 
 BUILD    := build
-SRC      := $(wildcard src/*.cpp)
-OBJ      := $(patsubst src/%.cpp,$(BUILD)/%.o,$(SRC))
+# Library sources: everything in src/ that is not an executable entry point.
+LIB_SRC  := $(filter-out src/replay_main.cpp,$(wildcard src/*.cpp))
+LIB_OBJ  := $(patsubst src/%.cpp,$(BUILD)/%.o,$(LIB_SRC))
 
 TEST_SRC := $(wildcard tests/*.cpp)
 BENCH_SRC:= $(wildcard bench/*.cpp)
@@ -32,13 +33,13 @@ $(BUILD):
 $(BUILD)/%.o: src/%.cpp | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) -c $< -o $@
 
-$(BUILD)/pricetime_tests: $(TEST_SRC) $(OBJ) | $(BUILD)
+$(BUILD)/pricetime_tests: $(TEST_SRC) $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
 
-$(BUILD)/pricetime_bench: $(BENCH_SRC) $(OBJ) | $(BUILD)
+$(BUILD)/pricetime_bench: $(BENCH_SRC) $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
 
-$(BUILD)/pricetime_replay: src/replay_main.cpp $(filter-out $(BUILD)/replay_main.o,$(OBJ)) | $(BUILD)
+$(BUILD)/pricetime_replay: src/replay_main.cpp $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
 
 test: $(BUILD)/pricetime_tests
@@ -54,7 +55,7 @@ replay: $(BUILD)/pricetime_replay
 asan: | $(BUILD)
 	@mkdir -p $(BUILD)/asan
 	$(CXX) $(STD) $(WARN) $(DEBUGOPT) -fsanitize=address,undefined \
-	  -fno-omit-frame-pointer $(INC) $(TEST_SRC) $(SRC) -o $(BUILD)/asan/tests
+	  -fno-omit-frame-pointer $(INC) $(TEST_SRC) $(LIB_SRC) -o $(BUILD)/asan/tests
 	@ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ./$(BUILD)/asan/tests
 
 clean:

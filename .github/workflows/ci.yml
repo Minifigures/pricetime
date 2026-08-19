@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        if: matrix.compiler == 'clang++'
+        run: sudo apt-get update && sudo apt-get install -y clang
+      # -march=native is unsafe on shared CI runners, so the portable
+      # baseline is used here. The published benchmark numbers come from
+      # `make bench` on a known machine, not from CI.
+      - name: Build and test
+        run: make test CXX=${{ matrix.compiler }} OPT="-O2 -DNDEBUG"
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AddressSanitizer + UndefinedBehaviorSanitizer
+        run: make asan
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runs to prove the harness is not bit-rotting. CI numbers are noisy
+      # on shared runners and are NOT the numbers in the README.
+      - name: Benchmark smoke
+        run: make bench CXX=g++ OPT="-O2 -DNDEBUG"
