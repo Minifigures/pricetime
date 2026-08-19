@@ -103,7 +103,23 @@ class Book {
   void set_occupied(Side s, Idx lvl, bool on) noexcept;
   [[nodiscard]] Idx scan_down(const std::vector<std::uint64_t>& bm, Idx from) const noexcept;
   [[nodiscard]] Idx scan_up(const std::vector<std::uint64_t>& bm, Idx from) const noexcept;
-  void refresh_best(Side s) noexcept;
+
+  // Best-price maintenance is incremental, and this is load-bearing.
+  //
+  // The obvious implementation rescans the occupancy bitmap from the end of
+  // the band after every mutation. That is O(band) and it is invisible on a
+  // synthetic benchmark with a narrow band: at 2,001 ticks the bitmap is 31
+  // words and the scan disappears into the noise. Replaying a real symbol,
+  // whose daily range spans hundreds of thousands of ticks, the same scan
+  // touches ~9,500 words per operation and dominates everything else.
+  //
+  // Instead: an insert can only ever improve the best, which is a compare and
+  // a store. A removal only matters if it emptied the level that WAS the best,
+  // and then the scan runs from there in the worsening direction only, so it
+  // costs the distance the touch actually moved rather than the width of the
+  // band.
+  void best_after_insert(Side s, Idx lvl) noexcept;
+  void best_after_remove(Side s, Idx lvl) noexcept;
 
   [[nodiscard]] Qty available_against(Side aggressor, Price limit) const;
 

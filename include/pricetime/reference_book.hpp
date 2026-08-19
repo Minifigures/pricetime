@@ -43,12 +43,25 @@ class ReferenceBook {
   [[nodiscard]] Price best_ask() const noexcept {
     return asks_.empty() ? kInvalidPrice : asks_.begin()->first;
   }
+  // Sums the resting quantity at one price. Slow by the standards of Book --
+  // it walks the level rather than keeping a running total -- which is fine
+  // and deliberate. What is NOT fine is copying the whole book to do it: an
+  // earlier version of this routed through as_generic(), which materialises
+  // every level into a fresh vector. Since queue_ahead made this run on every
+  // rest, that turned the reference engine 90x slower and made the
+  // Book-vs-Reference comparison meaningless. The four-regime benchmark caught
+  // it. Being the slow implementation is the reference's job; being
+  // accidentally quadratic is not.
   [[nodiscard]] Qty qty_at(Side s, Price p) const noexcept {
-    const auto& side = (s == Side::Buy) ? as_generic(bids_) : as_generic(asks_);
     Qty total = 0;
-    for (const auto& [px, lvl] : side) {
-      if (px != p) continue;
-      for (const auto& ro : lvl) total += ro.open;
+    if (s == Side::Buy) {
+      const auto it = bids_.find(p);
+      if (it != bids_.end())
+        for (const auto& ro : it->second) total += ro.open;
+    } else {
+      const auto it = asks_.find(p);
+      if (it != asks_.end())
+        for (const auto& ro : it->second) total += ro.open;
     }
     return total;
   }
@@ -66,15 +79,6 @@ class ReferenceBook {
   // comparator in the type is what lets both sides share one matching loop.
   using Bids = std::map<Price, Level, std::greater<Price>>;
   using Asks = std::map<Price, Level, std::less<Price>>;
-
-  // Erased view so qty_at/depth can walk either side without duplicating code.
-  using Generic = std::vector<std::pair<Price, Level>>;
-  [[nodiscard]] static Generic as_generic(const Bids& b) {
-    return Generic(b.begin(), b.end());
-  }
-  [[nodiscard]] static Generic as_generic(const Asks& a) {
-    return Generic(a.begin(), a.end());
-  }
 
   [[nodiscard]] Qty available_against(Side aggressor, Price limit) const;
   void rest(const RestingOrder& ro);

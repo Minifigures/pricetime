@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -73,6 +74,13 @@ int main(int argc, char** argv) {
   }
   const std::string path = argv[1];
   const std::string want = (argc > 2) ? argv[2] : std::string();
+  // Optional 3rd arg: clamp the ladder to N ticks centred on the median price,
+  // dropping messages outside it. This exists to TEST the hypothesis that the
+  // flat ladder's cost is dominated by band width (TLB/cache), not by
+  // algorithmic work. It is a diagnostic, not a feature: dropping real
+  // messages would be dishonest as a production path, and the count dropped is
+  // always reported.
+  const Price band_arg = (argc > 3) ? std::atoll(argv[3]) : 0;
 
   // ---- Pass 1: decode, pick the symbol, keep its messages in memory. -------
   // Decoding is deliberately outside the timed region. This benchmark measures
@@ -152,9 +160,16 @@ int main(int argc, char** argv) {
   // observed range with 5 percent of headroom, which is the honest way to size
   // it: no hand-tuned constant, and it is reported so the memory cost is
   // visible rather than hidden.
-  const Price pad   = std::max<Price>((hi - lo) / 20, 100);
-  const Price floor = std::max<Price>(1, lo - pad);
-  const Price ceil  = hi + pad;
+  Price floor, ceil;
+  if (band_arg > 0) {
+    const Price mid = (lo + hi) / 2;
+    floor = std::max<Price>(1, mid - band_arg / 2);
+    ceil  = mid + band_arg / 2;
+  } else {
+    const Price pad = std::max<Price>((hi - lo) / 20, 100);
+    floor = std::max<Price>(1, lo - pad);
+    ceil  = hi + pad;
+  }
   const double ladder_mb =
       static_cast<double>(ceil - floor + 1) * 2.0 * 24.0 / (1024.0 * 1024.0);
 
@@ -179,8 +194,13 @@ int main(int argc, char** argv) {
   std::vector<double> ns;
   ns.reserve(recs.size());
 
+  std::uint64_t out_of_band = 0;
   const auto t_start = Clock::now();
   for (const Rec& r : recs) {
+    if (band_arg > 0 && r.price > 0 && (r.price < floor || r.price > ceil)) {
+      ++out_of_band;
+      continue;
+    }
     const auto t0 = Clock::now();
     log.clear();
     switch (r.type) {
@@ -249,7 +269,12 @@ int main(int argc, char** argv) {
   std::printf("  engine latency  : p50 %.0f  p90 %.0f  p99 %.0f  p99.9 %.0f ns\n",
               pick(0.50), pick(0.90), pick(0.99), pick(0.999));
   std::printf("  throughput      : %.2f M msg/sec on real exchange flow\n",
-              static_cast<double>(recs.size()) / secs / 1e6);
+              static_cast<double>(recs.size() - out_of_band) / secs / 1e6);
+  if (band_arg > 0)
+    std::printf("  DIAGNOSTIC MODE : band clamped to %lld ticks; %llu of %zu "
+                "messages dropped as out-of-band\n",
+                static_cast<long long>(band_arg),
+                static_cast<unsigned long long>(out_of_band), recs.size());
   std::printf("  final book      : bid %s / ask %s, %zu resting\n",
               book.best_bid() == kInvalidPrice ? "-" : fmt_px(book.best_bid()).c_str(),
               book.best_ask() == kInvalidPrice ? "-" : fmt_px(book.best_ask()).c_str(),

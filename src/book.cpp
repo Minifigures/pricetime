@@ -88,11 +88,22 @@ Book::Idx Book::scan_down(const std::vector<std::uint64_t>& bm,
   }
 }
 
-void Book::refresh_best(Side s) noexcept {
+void Book::best_after_insert(Side s, Idx lvl) noexcept {
   if (s == Side::Buy) {
-    best_bid_ = (span_ == 0) ? kNoLevel : scan_down(bid_bm_, span_ - 1u);
+    if (best_bid_ == kNoLevel || lvl > best_bid_) best_bid_ = lvl;
   } else {
-    best_ask_ = scan_up(ask_bm_, 0u);
+    if (best_ask_ == kNoLevel || lvl < best_ask_) best_ask_ = lvl;
+  }
+}
+
+void Book::best_after_remove(Side s, Idx lvl) noexcept {
+  // Nothing to do unless the level that just emptied was the touch.
+  if (s == Side::Buy) {
+    if (best_bid_ != lvl) return;
+    best_bid_ = (lvl == 0) ? kNoLevel : scan_down(bid_bm_, lvl - 1u);
+  } else {
+    if (best_ask_ != lvl) return;
+    best_ask_ = scan_up(ask_bm_, lvl + 1u);
   }
 }
 
@@ -225,7 +236,9 @@ void Book::submit(const NewOrder& o, EventLog& out) {
     if (killed) break;
     if (!drained && remaining > 0) break;
   }
-  refresh_best(cside);
+  // At loop exit `lvl` is the first still-occupied contra level (or kNoLevel):
+  // the walk already skipped every level it drained. No rescan needed.
+  if (buying) best_ask_ = lvl; else best_bid_ = lvl;
 
   if (remaining <= 0) return;
 
@@ -258,7 +271,7 @@ void Book::submit(const NewOrder& o, EventLog& out) {
   link_back(own, nn.lvl, nidx);
   set_occupied(o.side, nn.lvl, true);
   index_[o.id] = nidx;
-  refresh_best(o.side);
+  best_after_insert(o.side, nn.lvl);
 }
 
 void Book::cancel(const CancelOrder& c, EventLog& out) {
@@ -280,10 +293,12 @@ void Book::cancel(const CancelOrder& c, EventLog& out) {
   out.push_back(e);
 
   unlink(lvls, node.lvl, n);
-  if (lvls[node.lvl].head == kNil) set_occupied(node.side, node.lvl, false);
+  if (lvls[node.lvl].head == kNil) {
+    set_occupied(node.side, node.lvl, false);
+    best_after_remove(node.side, node.lvl);
+  }
   free_node(n);
   index_.erase(it);
-  refresh_best(node.side);
 }
 
 void Book::replace(const ReplaceOrder& r, EventLog& out) {
@@ -323,11 +338,12 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
   }
 
   unlink(lvls, existing.lvl, n);
-  if (lvls[existing.lvl].head == kNil)
+  if (lvls[existing.lvl].head == kNil) {
     set_occupied(existing.side, existing.lvl, false);
+    best_after_remove(existing.side, existing.lvl);
+  }
   free_node(n);
   index_.erase(it);
-  refresh_best(existing.side);
 
   if (!in_band(r.price)) return;  // replaced out of band: order is gone
 
@@ -349,7 +365,7 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
   link_back(own, nn.lvl, nidx);
   set_occupied(existing.side, nn.lvl, true);
   index_[existing.id] = nidx;
-  refresh_best(existing.side);
+  best_after_insert(existing.side, nn.lvl);
 }
 
 std::vector<std::pair<Price, Qty>> Book::depth(Side s,
