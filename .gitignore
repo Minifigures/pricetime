@@ -64,3 +64,5 @@ data/raw/
 data/cache/
 *.parquet.tmp
 .DS_Store
+data/iex/
+*.pcap.gz

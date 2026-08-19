@@ -170,15 +170,22 @@ int main(int argc, char** argv) {
     floor = std::max<Price>(1, lo - pad);
     ceil  = hi + pad;
   }
+  // The accepted band is what the engine will take orders in. The HOT band is
+  // the flat ladder; anything outside it goes to the ordered-map tier. Only
+  // the hot band costs resident memory, so it is the one that matters.
+  const Price hot_ticks = std::min<Price>(Book::kDefaultHotTicks, ceil - floor + 1);
   const double ladder_mb =
-      static_cast<double>(ceil - floor + 1) * 2.0 * 24.0 / (1024.0 * 1024.0);
+      static_cast<double>(hot_ticks) * 2.0 * 16.0 / (1024.0 * 1024.0);
 
   std::printf("\n  symbol          : %s\n", chosen.c_str());
   std::printf("  messages        : %zu\n", recs.size());
   std::printf("  price range     : %s .. %s\n", fmt_px(lo).c_str(),
               fmt_px(hi).c_str());
-  std::printf("  ladder band     : %lld ticks (~%.1f MB, both sides)\n",
-              static_cast<long long>(ceil - floor + 1), ladder_mb);
+  std::printf("  accepted band   : %lld ticks\n",
+              static_cast<long long>(ceil - floor + 1));
+  std::printf("  hot ladder      : %lld ticks (~%.1f MB, both sides); rest "
+              "served by the cold tier\n",
+              static_cast<long long>(hot_ticks), ladder_mb);
 
   // ---- Pass 2: drive the engine. ------------------------------------------
   Book book(floor, ceil, SelfTradePolicy::None,

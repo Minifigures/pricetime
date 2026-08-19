@@ -5,9 +5,19 @@
 namespace pricetime {
 
 Book::Book(Price floor_px, Price ceil_px, SelfTradePolicy stp,
-           std::size_t expected_orders)
+           std::size_t expected_orders, Price hot_ticks)
     : floor_(floor_px), ceil_(ceil_px), stp_(stp) {
-  const Price raw_span = ceil_px - floor_px + 1;
+  // The hot ladder is centred on the accepted band and clamped to it. When the
+  // accepted band is already small (the synthetic benchmarks, most tests) the
+  // whole thing is hot and the cold tier never sees a level.
+  const Price accepted = ceil_ - floor_ + 1;
+  const Price hot_w = std::clamp<Price>(hot_ticks, 1, accepted > 0 ? accepted : 1);
+  const Price mid = floor_ + accepted / 2;
+  hot_floor_ = std::max<Price>(floor_, mid - hot_w / 2);
+  hot_ceil_  = std::min<Price>(ceil_, hot_floor_ + hot_w - 1);
+  if (hot_ceil_ < hot_floor_) hot_ceil_ = hot_floor_;
+
+  const Price raw_span = hot_ceil_ - hot_floor_ + 1;
   span_ = static_cast<Idx>(raw_span > 0 ? raw_span : 0);
   bid_lvls_.resize(span_);
   ask_lvls_.resize(span_);
@@ -15,15 +25,13 @@ Book::Book(Price floor_px, Price ceil_px, SelfTradePolicy stp,
   bid_bm_.assign(words, 0ull);
   ask_bm_.assign(words, 0ull);
 
-  // Pre-size the pool so steady-state operation never allocates. Growth is
-  // still handled (below) because a hard cap would turn a load spike into a
-  // crash, but in the benchmark path it never triggers.
   pool_.resize(expected_orders);
-  for (std::size_t i = 0; i < pool_.size(); ++i) {
+  for (std::size_t i = 0; i < pool_.size(); ++i)
     pool_[i].next = (i + 1 < pool_.size()) ? static_cast<Idx>(i + 1) : kNil;
-  }
   free_head_ = pool_.empty() ? kNil : 0u;
 }
+
+// ---------------------------------------------------------------------- pool
 
 Book::Idx Book::alloc_node() {
   if (free_head_ == kNil) {
@@ -44,6 +52,24 @@ void Book::free_node(Idx n) {
   pool_[n].next = free_head_;
   free_head_ = n;
 }
+
+void Book::link_back(Level& L, Idx node) {
+  pool_[node].prev = L.tail;
+  pool_[node].next = kNil;
+  if (L.tail != kNil) pool_[L.tail].next = node; else L.head = node;
+  L.tail = node;
+  L.total += pool_[node].open;
+}
+
+void Book::unlink(Level& L, Idx node) {
+  const Idx p = pool_[node].prev, n = pool_[node].next;
+  if (p != kNil) pool_[p].next = n; else L.head = n;
+  if (n != kNil) pool_[n].prev = p; else L.tail = p;
+  L.total -= pool_[node].open;
+  pool_[node].prev = pool_[node].next = kNil;
+}
+
+// --------------------------------------------------------------- hot bitmap
 
 void Book::set_occupied(Side s, Idx lvl, bool on) noexcept {
   auto& bm = (s == Side::Buy) ? bid_bm_ : ask_bm_;
@@ -78,10 +104,9 @@ Book::Idx Book::scan_down(const std::vector<std::uint64_t>& bm,
       (bit == 63u) ? ~0ull : ((1ull << (bit + 1u)) - 1ull);
   std::uint64_t word = bm[w] & mask;
   for (;;) {
-    if (word != 0ull) {
+    if (word != 0ull)
       return static_cast<Idx>((w << 6) + 63u -
              static_cast<std::size_t>(std::countl_zero(word)));
-    }
     if (w == 0) return kNoLevel;
     --w;
     word = bm[w];
@@ -97,7 +122,6 @@ void Book::best_after_insert(Side s, Idx lvl) noexcept {
 }
 
 void Book::best_after_remove(Side s, Idx lvl) noexcept {
-  // Nothing to do unless the level that just emptied was the touch.
   if (s == Side::Buy) {
     if (best_bid_ != lvl) return;
     best_bid_ = (lvl == 0) ? kNoLevel : scan_down(bid_bm_, lvl - 1u);
@@ -107,46 +131,129 @@ void Book::best_after_remove(Side s, Idx lvl) noexcept {
   }
 }
 
-void Book::link_back(std::vector<Level>& side, Idx lvl, Idx node) {
-  Level& L = side[lvl];
-  pool_[node].prev = L.tail;
-  pool_[node].next = kNil;
-  if (L.tail != kNil) pool_[L.tail].next = node; else L.head = node;
-  L.tail = node;
-  L.total += pool_[node].open;
+// ------------------------------------------------------------ tier dispatch
+
+Level* Book::find_level(Side s, Price p) noexcept {
+  return const_cast<Level*>(std::as_const(*this).find_level(s, p));
 }
 
-void Book::unlink(std::vector<Level>& side, Idx lvl, Idx node) {
-  Level& L = side[lvl];
-  const Idx p = pool_[node].prev, n = pool_[node].next;
-  if (p != kNil) pool_[p].next = n; else L.head = n;
-  if (n != kNil) pool_[n].prev = p; else L.tail = p;
-  L.total -= pool_[node].open;
-  pool_[node].prev = pool_[node].next = kNil;
+const Level* Book::find_level(Side s, Price p) const noexcept {
+  if (p == kInvalidPrice) return nullptr;
+  if (is_hot(p)) {
+    const Idx i = to_idx(p);
+    const Level& L = (s == Side::Buy) ? bid_lvls_[i] : ask_lvls_[i];
+    return L.empty() ? nullptr : &L;
+  }
+  if (s == Side::Buy) {
+    const auto it = cold_bids_.find(p);
+    return it == cold_bids_.end() ? nullptr : &it->second;
+  }
+  const auto it = cold_asks_.find(p);
+  return it == cold_asks_.end() ? nullptr : &it->second;
+}
+
+Level& Book::level_for(Side s, Price p) {
+  if (is_hot(p)) {
+    const Idx i = to_idx(p);
+    return (s == Side::Buy) ? bid_lvls_[i] : ask_lvls_[i];
+  }
+  return (s == Side::Buy) ? cold_bids_[p] : cold_asks_[p];
+}
+
+void Book::erase_level(Side s, Price p) noexcept {
+  if (is_hot(p)) {
+    const Idx i = to_idx(p);
+    set_occupied(s, i, false);
+    best_after_remove(s, i);
+    return;
+  }
+  if (s == Side::Buy) cold_bids_.erase(p); else cold_asks_.erase(p);
+}
+
+Price Book::best_px(Side s) const noexcept {
+  if (s == Side::Buy) {
+    const Price hot = (best_bid_ == kNoLevel) ? kInvalidPrice : to_price(best_bid_);
+    const Price cold = cold_bids_.empty() ? kInvalidPrice : cold_bids_.begin()->first;
+    if (hot == kInvalidPrice) return cold;
+    if (cold == kInvalidPrice) return hot;
+    return std::max(hot, cold);   // bids: higher is better
+  }
+  const Price hot = (best_ask_ == kNoLevel) ? kInvalidPrice : to_price(best_ask_);
+  const Price cold = cold_asks_.empty() ? kInvalidPrice : cold_asks_.begin()->first;
+  if (hot == kInvalidPrice) return cold;
+  if (cold == kInvalidPrice) return hot;
+  return std::min(hot, cold);     // asks: lower is better
+}
+
+Qty Book::qty_at(Side s, Price p) const noexcept {
+  const Level* L = find_level(s, p);
+  return L == nullptr ? 0 : L->total;
 }
 
 Qty Book::available_against(Side aggressor, Price limit) const {
+  // Walks both tiers merged in price order, stopping at the first level the
+  // aggressor cannot reach. Used only by the FOK precheck.
   Qty total = 0;
-  if (aggressor == Side::Buy) {
-    for (Idx l = best_ask_; l != kNoLevel; l = scan_up(ask_bm_, l + 1u)) {
-      if (!crosses(aggressor, limit, to_price(l))) break;
-      total += ask_lvls_[l].total;
+  const bool buying = (aggressor == Side::Buy);
+  Idx hot = buying ? best_ask_ : best_bid_;
+
+  if (buying) {
+    auto cit = cold_asks_.begin();
+    for (;;) {
+      const Price hp = (hot == kNoLevel) ? kInvalidPrice : to_price(hot);
+      const Price cp = (cit == cold_asks_.end()) ? kInvalidPrice : cit->first;
+      if (hp == kInvalidPrice && cp == kInvalidPrice) break;
+      const bool take_hot = (cp == kInvalidPrice) || (hp != kInvalidPrice && hp <= cp);
+      const Price px = take_hot ? hp : cp;
+      if (!crosses(aggressor, limit, px)) break;
+      total += take_hot ? ask_lvls_[hot].total : cit->second.total;
+      if (take_hot) hot = scan_up(ask_bm_, hot + 1u); else ++cit;
     }
   } else {
-    for (Idx l = best_bid_; l != kNoLevel;
-         l = (l == 0 ? kNoLevel : scan_down(bid_bm_, l - 1u))) {
-      if (!crosses(aggressor, limit, to_price(l))) break;
-      total += bid_lvls_[l].total;
+    auto cit = cold_bids_.begin();
+    for (;;) {
+      const Price hp = (hot == kNoLevel) ? kInvalidPrice : to_price(hot);
+      const Price cp = (cit == cold_bids_.end()) ? kInvalidPrice : cit->first;
+      if (hp == kInvalidPrice && cp == kInvalidPrice) break;
+      const bool take_hot = (cp == kInvalidPrice) || (hp != kInvalidPrice && hp >= cp);
+      const Price px = take_hot ? hp : cp;
+      if (!crosses(aggressor, limit, px)) break;
+      total += take_hot ? bid_lvls_[hot].total : cit->second.total;
+      if (take_hot) hot = (hot == 0 ? kNoLevel : scan_down(bid_bm_, hot - 1u));
+      else ++cit;
     }
   }
   return total;
 }
 
-Qty Book::qty_at(Side s, Price p) const noexcept {
-  if (!in_band(p)) return 0;
-  const Idx l = to_idx(p);
-  return (s == Side::Buy) ? bid_lvls_[l].total : ask_lvls_[l].total;
+// -------------------------------------------------------------------- rest
+
+void Book::rest_order(const NewOrder& o, Qty qty, Seq stamp, EventLog& out) {
+  Event rested;
+  rested.kind        = Event::Kind::Rested;
+  rested.order_id    = o.id;
+  rested.side        = o.side;
+  rested.price       = o.price;
+  rested.qty         = qty;
+  rested.seq         = next_seq_++;
+  rested.queue_ahead = qty_at(o.side, o.price);  // measured before insertion
+  out.push_back(rested);
+
+  const Idx nidx = alloc_node();
+  Node& nn = pool_[nidx];
+  nn.id = o.id; nn.owner = o.owner; nn.open = qty;
+  nn.seq = stamp; nn.side = o.side; nn.price = o.price;
+  Level& L = level_for(o.side, o.price);
+  link_back(L, nidx);
+  if (is_hot(o.price)) {
+    const Idx i = to_idx(o.price);
+    set_occupied(o.side, i, true);
+    best_after_insert(o.side, i);
+  }
+  index_[o.id] = nidx;
 }
+
+// ------------------------------------------------------------------ submit
 
 void Book::submit(const NewOrder& o, EventLog& out) {
   auto reject = [&](RejectReason why) {
@@ -176,22 +283,26 @@ void Book::submit(const NewOrder& o, EventLog& out) {
   acc.price = o.price; acc.qty = o.qty; acc.seq = next_seq_++;
   out.push_back(acc);
 
-  const bool buying = (o.side == Side::Buy);
-  auto& clvls = buying ? ask_lvls_ : bid_lvls_;
   const Side cside = opposite(o.side);
-
   Qty  remaining = o.qty;
   bool killed    = false;
-  Idx  lvl       = buying ? best_ask_ : best_bid_;
 
-  while (remaining > 0 && lvl != kNoLevel) {
-    const Price px = to_price(lvl);
+  // Walk the contra side best-first across both tiers. best_px() is O(1), so
+  // recomputing it after draining a level is cheaper than threading a cursor
+  // through two structures with different iterator types.
+  for (;;) {
+    if (remaining <= 0) break;
+    const Price px = best_px(cside);
+    if (px == kInvalidPrice) break;
     if (!crosses(o.side, limit, px)) break;
 
-    Level& L = clvls[lvl];
+    Level* Lp = find_level(cside, px);
+    if (Lp == nullptr) break;
+    Level& L = *Lp;
+
     while (L.head != kNil && remaining > 0) {
-      const Idx  n  = L.head;
-      Node&      rn = pool_[n];
+      const Idx n = L.head;
+      Node& rn = pool_[n];
 
       const bool self_match = stp_ != SelfTradePolicy::None &&
                               o.owner != kAnonymous && rn.owner == o.owner;
@@ -202,7 +313,7 @@ void Book::submit(const NewOrder& o, EventLog& out) {
           e.price = px; e.qty = rn.open; e.seq = next_seq_++;
           out.push_back(e);
           index_.erase(rn.id);
-          unlink(clvls, lvl, n);
+          unlink(L, n);
           free_node(n);
           continue;
         }
@@ -217,10 +328,7 @@ void Book::submit(const NewOrder& o, EventLog& out) {
       remaining -= q;
       if (rn.open == 0) {
         index_.erase(rn.id);
-        L.total += 0;              // node already discounted above
-        const Idx nx = rn.next;
-        // unlink without double-counting total (open is now 0)
-        const Idx p = rn.prev;
+        const Idx nx = rn.next, p = rn.prev;
         if (p != kNil) pool_[p].next = nx; else L.head = nx;
         if (nx != kNil) pool_[nx].prev = p; else L.tail = p;
         free_node(n);
@@ -228,17 +336,10 @@ void Book::submit(const NewOrder& o, EventLog& out) {
     }
 
     const bool drained = (L.head == kNil);
-    if (drained) {
-      set_occupied(cside, lvl, false);
-      lvl = buying ? scan_up(ask_bm_, lvl + 1u)
-                   : (lvl == 0 ? kNoLevel : scan_down(bid_bm_, lvl - 1u));
-    }
+    if (drained) erase_level(cside, px);
     if (killed) break;
-    if (!drained && remaining > 0) break;
+    if (!drained) break;   // level survived with an untouchable head
   }
-  // At loop exit `lvl` is the first still-occupied contra level (or kNoLevel):
-  // the walk already skipped every level it drained. No rescan needed.
-  if (buying) best_ask_ = lvl; else best_bid_ = lvl;
 
   if (remaining <= 0) return;
 
@@ -252,27 +353,10 @@ void Book::submit(const NewOrder& o, EventLog& out) {
     out.push_back(e);
     return;
   }
-
-  Event rested;
-  rested.kind        = Event::Kind::Rested;
-  rested.order_id    = o.id;
-  rested.side        = o.side;
-  rested.price       = o.price;
-  rested.qty         = remaining;
-  rested.seq         = next_seq_++;
-  rested.queue_ahead = qty_at(o.side, o.price);  // measured before insertion
-  out.push_back(rested);
-
-  const Idx nidx = alloc_node();
-  Node& nn = pool_[nidx];
-  nn.id = o.id; nn.owner = o.owner; nn.open = remaining;
-  nn.seq = acc.seq; nn.side = o.side; nn.lvl = to_idx(o.price);
-  auto& own = buying ? bid_lvls_ : ask_lvls_;
-  link_back(own, nn.lvl, nidx);
-  set_occupied(o.side, nn.lvl, true);
-  index_[o.id] = nidx;
-  best_after_insert(o.side, nn.lvl);
+  rest_order(o, remaining, acc.seq, out);
 }
+
+// ------------------------------------------------------------------ cancel
 
 void Book::cancel(const CancelOrder& c, EventLog& out) {
   auto it = index_.find(c.id);
@@ -285,21 +369,20 @@ void Book::cancel(const CancelOrder& c, EventLog& out) {
   }
   const Idx  n    = it->second;
   const Node node = pool_[n];
-  auto& lvls = (node.side == Side::Buy) ? bid_lvls_ : ask_lvls_;
 
   Event e;
   e.kind = Event::Kind::Canceled; e.order_id = c.id; e.side = node.side;
-  e.price = to_price(node.lvl); e.qty = node.open; e.seq = next_seq_++;
+  e.price = node.price; e.qty = node.open; e.seq = next_seq_++;
   out.push_back(e);
 
-  unlink(lvls, node.lvl, n);
-  if (lvls[node.lvl].head == kNil) {
-    set_occupied(node.side, node.lvl, false);
-    best_after_remove(node.side, node.lvl);
-  }
+  Level& L = level_for(node.side, node.price);
+  unlink(L, n);
+  if (L.head == kNil) erase_level(node.side, node.price);
   free_node(n);
   index_.erase(it);
 }
+
+// ----------------------------------------------------------------- replace
 
 void Book::replace(const ReplaceOrder& r, EventLog& out) {
   auto it = index_.find(r.id);
@@ -320,8 +403,7 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
 
   const Idx  n        = it->second;
   const Node existing = pool_[n];
-  const Price old_px  = to_price(existing.lvl);
-  auto& lvls = (existing.side == Side::Buy) ? bid_lvls_ : ask_lvls_;
+  const Price old_px  = existing.price;
 
   const bool keeps_priority = (r.price == old_px) && (r.qty <= existing.open);
 
@@ -331,54 +413,56 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
   out.push_back(ev);
 
   if (keeps_priority) {
-    Level& L = lvls[existing.lvl];
+    Level& L = level_for(existing.side, old_px);
     L.total -= (existing.open - r.qty);
     pool_[n].open = r.qty;
     return;
   }
 
-  unlink(lvls, existing.lvl, n);
-  if (lvls[existing.lvl].head == kNil) {
-    set_occupied(existing.side, existing.lvl, false);
-    best_after_remove(existing.side, existing.lvl);
-  }
+  Level& L = level_for(existing.side, old_px);
+  unlink(L, n);
+  if (L.head == kNil) erase_level(existing.side, old_px);
   free_node(n);
   index_.erase(it);
 
   if (!in_band(r.price)) return;  // replaced out of band: order is gone
 
-  Event rested;
-  rested.kind        = Event::Kind::Rested;
-  rested.order_id    = existing.id;
-  rested.side        = existing.side;
-  rested.price       = r.price;
-  rested.qty         = r.qty;
-  rested.seq         = next_seq_++;
-  rested.queue_ahead = qty_at(existing.side, r.price);
-  out.push_back(rested);
-
-  const Idx nidx = alloc_node();
-  Node& nn = pool_[nidx];
-  nn.id = existing.id; nn.owner = existing.owner; nn.open = r.qty;
-  nn.seq = ev.seq; nn.side = existing.side; nn.lvl = to_idx(r.price);
-  auto& own = (existing.side == Side::Buy) ? bid_lvls_ : ask_lvls_;
-  link_back(own, nn.lvl, nidx);
-  set_occupied(existing.side, nn.lvl, true);
-  index_[existing.id] = nidx;
-  best_after_insert(existing.side, nn.lvl);
+  NewOrder shim;
+  shim.id = existing.id; shim.owner = existing.owner;
+  shim.side = existing.side; shim.price = r.price;
+  rest_order(shim, r.qty, ev.seq, out);
 }
+
+// ------------------------------------------------------------------- depth
 
 std::vector<std::pair<Price, Qty>> Book::depth(Side s,
                                                std::size_t levels) const {
   std::vector<std::pair<Price, Qty>> out;
-  if (s == Side::Buy) {
-    for (Idx l = best_bid_; l != kNoLevel && out.size() < levels;
-         l = (l == 0 ? kNoLevel : scan_down(bid_bm_, l - 1u)))
-      out.emplace_back(to_price(l), bid_lvls_[l].total);
+  const bool buy = (s == Side::Buy);
+  Idx hot = buy ? best_bid_ : best_ask_;
+
+  if (buy) {
+    auto cit = cold_bids_.begin();
+    while (out.size() < levels) {
+      const Price hp = (hot == kNoLevel) ? kInvalidPrice : to_price(hot);
+      const Price cp = (cit == cold_bids_.end()) ? kInvalidPrice : cit->first;
+      if (hp == kInvalidPrice && cp == kInvalidPrice) break;
+      const bool take_hot = (cp == kInvalidPrice) || (hp != kInvalidPrice && hp >= cp);
+      if (take_hot) { out.emplace_back(hp, bid_lvls_[hot].total);
+                      hot = (hot == 0 ? kNoLevel : scan_down(bid_bm_, hot - 1u)); }
+      else          { out.emplace_back(cp, cit->second.total); ++cit; }
+    }
   } else {
-    for (Idx l = best_ask_; l != kNoLevel && out.size() < levels;
-         l = scan_up(ask_bm_, l + 1u))
-      out.emplace_back(to_price(l), ask_lvls_[l].total);
+    auto cit = cold_asks_.begin();
+    while (out.size() < levels) {
+      const Price hp = (hot == kNoLevel) ? kInvalidPrice : to_price(hot);
+      const Price cp = (cit == cold_asks_.end()) ? kInvalidPrice : cit->first;
+      if (hp == kInvalidPrice && cp == kInvalidPrice) break;
+      const bool take_hot = (cp == kInvalidPrice) || (hp != kInvalidPrice && hp <= cp);
+      if (take_hot) { out.emplace_back(hp, ask_lvls_[hot].total);
+                      hot = scan_up(ask_bm_, hot + 1u); }
+      else          { out.emplace_back(cp, cit->second.total); ++cit; }
+    }
   }
   return out;
 }

@@ -68,11 +68,18 @@ int combo_key(OrderType t, TimeInForce f, Side s) {
 }
 
 // Runs one seeded campaign. Returns the number of operations applied.
+//
+// hot_ticks controls how much of the price band the flat ladder covers. The
+// default campaigns run fully hot; the two-tier campaigns pass a deliberately
+// tiny value so most prices land in the cold ordered-map tier and the merged
+// best-price walk, merged depth, and merged FOK precheck all get exercised.
+// Without this the cold path would be dead code that still shipped.
 std::size_t run_campaign(std::uint64_t seed, std::size_t ops,
-                         SelfTradePolicy stp) {
+                         SelfTradePolicy stp,
+                         Price hot_ticks = Book::kDefaultHotTicks) {
   Rng rng(seed);
   ReferenceBook ref(stp);
-  Book fast(kFloor, kCeil, stp);
+  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks);
 
   std::vector<OrderId> live;
   OrderId next_id = 1;
@@ -177,6 +184,22 @@ TEST(differential_stp_cancel_aggressor) {
 // Coverage assertion: the generator must actually have produced every
 // order-type / time-in-force / side combination that the enums permit. Without
 // this, a generator bug silently narrows the fuzz and the suite still passes.
+// The cold tier: a 64-tick hot ladder inside a 2001-tick band, so roughly 97
+// percent of generated prices take the ordered-map path and the two tiers must
+// be merged correctly on every read.
+TEST(differential_two_tier_cold_path) {
+  for (std::uint64_t seed = 300; seed <= 312; ++seed)
+    CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::None, 64), 4000u);
+}
+
+TEST(differential_two_tier_boundary_straddling) {
+  // A hot band of exactly half the price range, so the touch repeatedly
+  // crosses the hot/cold boundary and best-price tracking has to hand off
+  // between the bitmap and the map in both directions.
+  for (std::uint64_t seed = 400; seed <= 410; ++seed)
+    CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::CancelResting, 1000), 4000u);
+}
+
 TEST(all_combinations_exercised) {
   std::set<int> expected;
   for (auto t : kTypes)

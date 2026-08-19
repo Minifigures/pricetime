@@ -31,8 +31,14 @@ all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay
 $(BUILD):
 	@mkdir -p $(BUILD)
 
+# -MMD -MP emits a .d file per object listing the headers it included, so
+# editing a header rebuilds everything that depends on it. Without this a
+# changed header leaves stale objects that either link against a vanished
+# symbol or, far worse, link successfully against a struct whose layout moved.
 $(BUILD)/%.o: src/%.cpp | $(BUILD)
-	$(CXX) $(STD) $(WARN) $(OPT) $(INC) -c $< -o $@
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) -MMD -MP -c $< -o $@
+
+-include $(LIB_OBJ:.o=.d)
 
 $(BUILD)/pricetime_tests: $(TEST_SRC) $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
