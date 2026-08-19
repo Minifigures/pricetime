@@ -188,6 +188,17 @@ void ReferenceBook::submit(const NewOrder& o, EventLog& out) {
   ro.price = o.price;
   ro.open  = remainder;
   ro.seq   = acc.seq;
+
+  Event rested;
+  rested.kind        = Event::Kind::Rested;
+  rested.order_id    = o.id;
+  rested.side        = o.side;
+  rested.price       = o.price;
+  rested.qty         = remainder;
+  rested.seq         = next_seq_++;
+  rested.queue_ahead = qty_at(o.side, o.price);  // measured before insertion
+  out.push_back(rested);
+
   rest(ro);
 }
 
@@ -288,6 +299,17 @@ void ReferenceBook::replace(const ReplaceOrder& r, EventLog& out) {
   ro.price = r.price;
   ro.open  = r.qty;
   ro.seq   = ev.seq;  // lost priority: re-stamped to now
+
+  Event rested;
+  rested.kind        = Event::Kind::Rested;
+  rested.order_id    = r.id;
+  rested.side        = side;
+  rested.price       = r.price;
+  rested.qty         = r.qty;
+  rested.seq         = next_seq_++;
+  rested.queue_ahead = qty_at(side, r.price);
+  out.push_back(rested);
+
   rest(ro);
 }
 

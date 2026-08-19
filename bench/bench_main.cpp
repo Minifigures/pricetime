@@ -55,11 +55,48 @@ struct Op {
   CancelOrder  c;
 };
 
-// Order flow shaped like a real book rather than uniform noise: prices cluster
-// tightly around the touch (most quoting happens within a few ticks), and
-// cancels dominate submits, which is what actual venue traffic looks like --
-// the overwhelming majority of messages an exchange receives are cancels.
-std::vector<Op> generate(std::size_t n, std::uint64_t seed) {
+// ---------------------------------------------------------------------------
+// Flow regimes.
+//
+// A single hand-tuned order flow is not a benchmark, it is a demo. The author
+// of the flow is also the author of the engine, so any number produced that
+// way is unfalsifiable: the flow could have been shaped, consciously or not,
+// until the engine looked good.
+//
+// The defence is to run several deliberately different regimes, including ones
+// chosen specifically to be hostile to this design, and to publish all of them
+// with the worst case named. If the ladder-and-bitmap approach has a weakness,
+// it should be visible in this table rather than discovered by a reviewer.
+// ---------------------------------------------------------------------------
+struct Regime {
+  const char* name;
+  const char* hypothesis;   // what this is meant to stress, stated in advance
+  std::int64_t spread_ticks;  // how far from mid orders are placed
+  int cancel_pct;             // share of messages that are cancels
+  int sweep_pct;              // share of submits that are large crossing orders
+  std::int64_t max_qty;
+};
+
+constexpr Regime kRegimes[] = {
+    {"tight", "Baseline. Deep book in a narrow band: the case the flat ladder "
+              "and the bitmap were designed for.",
+     12, 45, 0, 100},
+    {"wide", "Orders scattered across the full 2001-tick band. Levels are "
+             "sparse, so the occupancy bitmap has to skip many empty words and "
+             "the ladder's locality advantage largely disappears.",
+     900, 45, 0, 100},
+    {"sweep", "Large marketable orders that consume many levels in one "
+              "message. Stresses the level-advance path: every consumed level "
+              "costs a bitmap clear plus a scan.",
+     12, 25, 15, 4000},
+    {"cancel_storm", "90 percent cancels against a large resting population. "
+                     "This is the adversarial one: it is the path that leans "
+                     "hardest on the std::unordered_map order index, which is "
+                     "the least optimized thing in the engine.",
+     12, 90, 0, 60},
+};
+
+std::vector<Op> generate(std::size_t n, std::uint64_t seed, const Regime& rg) {
   Rng rng(seed);
   std::vector<Op> ops;
   ops.reserve(n);
@@ -68,7 +105,7 @@ std::vector<Op> generate(std::size_t n, std::uint64_t seed) {
 
   for (std::size_t i = 0; i < n; ++i) {
     Op op;
-    if (!live.empty() && rng.in(1, 100) <= 45) {
+    if (!live.empty() && rng.in(1, 100) <= rg.cancel_pct) {
       op.k = Op::K::Cancel;
       const auto k = static_cast<std::size_t>(rng.in(0, static_cast<std::int64_t>(live.size()) - 1));
       op.c.id = live[k];
@@ -80,11 +117,15 @@ std::vector<Op> generate(std::size_t n, std::uint64_t seed) {
       op.n.owner = static_cast<ParticipantId>(rng.in(1, 8));
       op.n.side  = rng.in(0, 1) == 0 ? Side::Buy : Side::Sell;
       op.n.type  = OrderType::Limit;
-      op.n.tif   = TimeInForce::Day;
-      const std::int64_t offset = rng.in(-12, 12);
-      op.n.price = std::clamp<Price>(kMid + offset, kFloor, kCeil);
-      op.n.qty   = rng.in(1, 100);
-      live.push_back(op.n.id);
+      const bool sweep = rg.sweep_pct > 0 && rng.in(1, 100) <= rg.sweep_pct;
+      op.n.tif = sweep ? TimeInForce::IOC : TimeInForce::Day;
+      const std::int64_t off = rng.in(1, rg.spread_ticks);
+      op.n.price = (op.n.side == Side::Buy)
+                       ? (sweep ? kMid + rg.spread_ticks : kMid - off)
+                       : (sweep ? kMid - rg.spread_ticks : kMid + off);
+      op.n.price = std::clamp<Price>(op.n.price, kFloor, kCeil);
+      op.n.qty   = rng.in(1, sweep ? rg.max_qty : std::min<std::int64_t>(rg.max_qty, 100));
+      if (!sweep) live.push_back(op.n.id);
     }
     ops.push_back(op);
   }
@@ -159,43 +200,51 @@ Stats run(Engine& eng, const std::vector<Op>& ops, bool collect) {
 }  // namespace
 
 int main() {
-  constexpr std::size_t kWarmup = 200'000;
-  constexpr std::size_t kOps    = 2'000'000;
+  constexpr std::size_t kWarmup = 100'000;
+  constexpr std::size_t kOps    = 1'000'000;
 
   std::printf("pricetime benchmark\n");
-  std::printf("  operations   : %zu (after %zu warmup)\n", kOps, kWarmup);
-  std::printf("  price band   : [%lld, %lld] ticks\n",
+  std::printf("  operations per regime : %zu (after %zu warmup)\n", kOps, kWarmup);
+  std::printf("  price band            : [%lld, %lld] ticks\n",
               static_cast<long long>(kFloor), static_cast<long long>(kCeil));
-  std::printf("  flow         : 55%% submit / 45%% cancel, prices within "
-              "12 ticks of mid\n");
-  std::printf("  timer overhead (median of paired clock reads): %.0f ns\n",
+  std::printf("  timer overhead        : %.0f ns (median of paired clock reads,\n",
               measure_timer_overhead());
-  std::printf("  NOTE: latencies below INCLUDE that overhead; they are not "
-              "adjusted.\n\n");
+  std::printf("                          INCLUDED in every number below, not subtracted)\n\n");
 
-  const auto warm = generate(kWarmup, 0xC0FFEE);
-  const auto flow = generate(kOps, 0xBEEF);
+  std::printf("  %-14s %-8s %7s %7s %7s %8s %8s %11s\n", "regime", "engine",
+              "p50", "p90", "p99", "p99.9", "mean", "ops/sec");
+  std::printf("  %s\n", std::string(84, '-').c_str());
 
-  std::printf("  %-22s %8s %8s %8s %8s %9s %12s\n", "engine (ns/op)", "p50",
-              "p90", "p99", "p99.9", "mean", "ops/sec");
-  std::printf("  %s\n", std::string(82, '-').c_str());
+  double worst_tail = 0.0;
+  const char* worst_name = "";
 
-  {
+  for (const Regime& rg : kRegimes) {
+    const auto warm = generate(kWarmup, 0xC0FFEE, rg);
+    const auto flow = generate(kOps, 0xBEEF, rg);
+
     Book b(kFloor, kCeil);
     run(b, warm, false);
-    Book fresh(kFloor, kCeil);
-    run(fresh, warm, false);
-    const Stats s = run(fresh, flow, true);
-    print_row("Book (optimized)", s);
-  }
-  {
+    const Stats fs = run(b, flow, true);
+    std::printf("  %-14s %-8s %7.0f %7.0f %7.0f %8.0f %8.0f %11.0f\n",
+                rg.name, "Book", fs.p50, fs.p90, fs.p99, fs.p999, fs.mean,
+                fs.ops_per_sec);
+
     ReferenceBook r;
     run(r, warm, false);
-    ReferenceBook fresh;
-    run(fresh, warm, false);
-    const Stats s = run(fresh, flow, true);
-    print_row("ReferenceBook", s);
+    const Stats rs = run(r, flow, true);
+    std::printf("  %-14s %-8s %7.0f %7.0f %7.0f %8.0f %8.0f %11.0f\n",
+                "", "Reference", rs.p50, rs.p90, rs.p99, rs.p999, rs.mean,
+                rs.ops_per_sec);
+    std::printf("\n");
+
+    if (fs.p999 > worst_tail) { worst_tail = fs.p999; worst_name = rg.name; }
   }
+
+  std::printf("  WORST CASE for Book: regime \"%s\" at %.0f ns p99.9\n\n",
+              worst_name, worst_tail);
+  std::printf("  Regime hypotheses (stated before measuring):\n");
+  for (const Regime& rg : kRegimes)
+    std::printf("    %-14s %s\n", rg.name, rg.hypothesis);
   std::printf("\n");
   return 0;
 }

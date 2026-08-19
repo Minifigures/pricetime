@@ -240,6 +240,16 @@ void Book::submit(const NewOrder& o, EventLog& out) {
     return;
   }
 
+  Event rested;
+  rested.kind        = Event::Kind::Rested;
+  rested.order_id    = o.id;
+  rested.side        = o.side;
+  rested.price       = o.price;
+  rested.qty         = remaining;
+  rested.seq         = next_seq_++;
+  rested.queue_ahead = qty_at(o.side, o.price);  // measured before insertion
+  out.push_back(rested);
+
   const Idx nidx = alloc_node();
   Node& nn = pool_[nidx];
   nn.id = o.id; nn.owner = o.owner; nn.open = remaining;
@@ -320,6 +330,16 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
   refresh_best(existing.side);
 
   if (!in_band(r.price)) return;  // replaced out of band: order is gone
+
+  Event rested;
+  rested.kind        = Event::Kind::Rested;
+  rested.order_id    = existing.id;
+  rested.side        = existing.side;
+  rested.price       = r.price;
+  rested.qty         = r.qty;
+  rested.seq         = next_seq_++;
+  rested.queue_ahead = qty_at(existing.side, r.price);
+  out.push_back(rested);
 
   const Idx nidx = alloc_node();
   Node& nn = pool_[nidx];

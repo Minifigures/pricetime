@@ -19,9 +19,10 @@ namespace pricetime {
 // fails. That is only possible because Event is comparable and total.
 struct Event {
   enum class Kind : std::uint8_t {
-    Accepted,  // order passed validation and entered the book (or began taking)
+    Accepted,  // order passed validation; matching is about to begin
     Rejected,  // order failed validation; no state change
     Trade,     // a match occurred between aggressor and resting
+    Rested,    // unfilled remainder joined the book at a price level
     Canceled,  // order left the book (explicit cancel, IOC remainder, or STP)
     Replaced,  // cancel/replace applied
   };
@@ -34,6 +35,17 @@ struct Event {
   Qty           qty       = 0;                // Trade: executed size
   Seq           seq       = 0;
   RejectReason  reason    = RejectReason::None;
+
+  // Rested only: total quantity already queued ahead of this order at its
+  // price level, at the moment it rested.
+  //
+  // This is published deliberately. A market maker cannot compute the
+  // probability of being filled without knowing how much size sits in front
+  // of them, and an engine that hides it forces every participant to either
+  // guess or penny the touch with full size. Queue position is the scarce
+  // resource a price-time venue allocates; refusing to disclose how much of
+  // it you were given makes the allocation unauditable.
+  Qty           queue_ahead = 0;
 
   [[nodiscard]] bool operator==(const Event&) const = default;
 };
@@ -62,6 +74,7 @@ struct Event {
     case Event::Kind::Accepted: return "ACCEPTED";
     case Event::Kind::Rejected: return "REJECTED";
     case Event::Kind::Trade:    return "TRADE";
+    case Event::Kind::Rested:   return "RESTED";
     case Event::Kind::Canceled: return "CANCELED";
     case Event::Kind::Replaced: return "REPLACED";
   }
@@ -73,7 +86,8 @@ struct Event {
 [[nodiscard]] inline std::string to_line(const Event& e) {
   char buf[192];
   std::snprintf(buf, sizeof(buf),
-                "%-8s id=%llu contra=%llu %s px=%lld qty=%lld seq=%llu rej=%s",
+                "%-8s id=%llu contra=%llu %s px=%lld qty=%lld seq=%llu rej=%s "
+                "qa=%lld",
                 to_string(e.kind),
                 static_cast<unsigned long long>(e.order_id),
                 static_cast<unsigned long long>(e.contra_id),
@@ -81,7 +95,8 @@ struct Event {
                 static_cast<long long>(e.price),
                 static_cast<long long>(e.qty),
                 static_cast<unsigned long long>(e.seq),
-                to_string(e.reason));
+                to_string(e.reason),
+                static_cast<long long>(e.queue_ahead));
   return std::string(buf);
 }
 

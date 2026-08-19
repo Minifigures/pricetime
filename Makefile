@@ -18,14 +18,14 @@ INC      := -Iinclude
 
 BUILD    := build
 # Library sources: everything in src/ that is not an executable entry point.
-LIB_SRC  := $(filter-out src/replay_main.cpp,$(wildcard src/*.cpp))
+LIB_SRC  := $(filter-out %_main.cpp,$(wildcard src/*.cpp))
 LIB_OBJ  := $(patsubst src/%.cpp,$(BUILD)/%.o,$(LIB_SRC))
 
 TEST_SRC := $(wildcard tests/*.cpp)
 BENCH_SRC:= $(wildcard bench/*.cpp)
 
-.PHONY: all test bench asan replay clean fmt
-all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay
+.PHONY: all test bench asan replay iex clean fmt
+all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay $(BUILD)/pricetime_iex
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -42,6 +42,9 @@ $(BUILD)/pricetime_bench: $(BENCH_SRC) $(LIB_OBJ) | $(BUILD)
 $(BUILD)/pricetime_replay: src/replay_main.cpp $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
 
+$(BUILD)/pricetime_iex: src/replay_iex_main.cpp $(LIB_OBJ) | $(BUILD)
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
+
 test: $(BUILD)/pricetime_tests
 	@./$(BUILD)/pricetime_tests
 
@@ -50,6 +53,9 @@ bench: $(BUILD)/pricetime_bench
 
 replay: $(BUILD)/pricetime_replay
 	@./$(BUILD)/pricetime_replay
+
+iex: $(BUILD)/pricetime_iex
+	@echo 'usage: ./build/pricetime_iex <IEX_DPLS.pcap.gz> [SYMBOL]'
 
 # Sanitizers are a separate build dir so they never poison the timed binaries.
 asan: | $(BUILD)
