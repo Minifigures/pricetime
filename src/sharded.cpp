@@ -39,8 +39,26 @@ void ShardedReplay::run(const std::vector<ShardedMsg>& msgs) {
       const auto key = std::make_pair(m.venue, m.symbol);
 
       auto bit = sh.books.find(key);
-      if (bit == sh.books.end())
-        bit = sh.books.emplace(key, std::make_unique<Book>(floor_, ceil_)).first;
+      if (bit == sh.books.end()) {
+        // Modest per-book pool, NOT the single-symbol default.
+        //
+        // Book pre-allocates its order pool so the hot path never allocates,
+        // and for one busy symbol 65,536 nodes is right. Multiplied across a
+        // real symbol universe it is not: 4 venues x 256 symbols is 1,024
+        // books, and at ~48 bytes a node that is over 3 GB of pool reserved to
+        // process a few thousand messages. It OOM-killed CI.
+        //
+        // Most symbols are quiet, so each book starts small and alloc_node()
+        // grows the ones that turn out to be busy. The cost is a handful of
+        // reallocations on the few hot names during warmup; the alternative is
+        // reserving for the worst case on every name simultaneously.
+        constexpr std::size_t kPerBookOrders = 1u << 10;
+        bit = sh.books
+                  .emplace(key, std::make_unique<Book>(
+                                    floor_, ceil_, SelfTradePolicy::None,
+                                    kPerBookOrders))
+                  .first;
+      }
       Book& book = *bit->second;
       EventLog& log = sh.logs[key];
 
