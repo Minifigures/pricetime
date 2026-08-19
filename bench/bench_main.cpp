@@ -26,7 +26,9 @@
 #include <vector>
 
 #include "pricetime/book.hpp"
+#include "pricetime/sharded.hpp"
 #include "pricetime/reference_book.hpp"
+#include "pricetime/sharded.hpp"
 
 using namespace pricetime;
 using Clock = std::chrono::steady_clock;
@@ -245,6 +247,123 @@ int main() {
   std::printf("  Regime hypotheses (stated before measuring):\n");
   for (const Regime& rg : kRegimes)
     std::printf("    %-14s %s\n", rg.name, rg.hypothesis);
+  // ---------------------------------------------------------------------
+  // Sharding scale-out.
+  //
+  // Caveats stated up front, because a scaling chart with no caveats is a
+  // sales chart: this runs under WSL2 with no core pinning, no isolated
+  // cores, no NUMA control and hyperthreading on. Turbo clocks drop as more
+  // cores engage, so perfect linear scaling is not physically available even
+  // with perfect code. The number worth reading is the shape, not the slope.
+  // ---------------------------------------------------------------------
+  std::printf("\n  sharding scale-out (%u hardware threads reported)\n",
+              std::thread::hardware_concurrency());
+  std::printf("  flow: 2,000,000 messages over 4 venues x 400 symbols\n");
+  std::printf("  WSL2, no core pinning, no isolation, hyperthreading on\n\n");
+
+  {
+    Rng rng(0x5EED);
+    std::vector<ShardedMsg> flow;
+    flow.reserve(2'000'000);
+    std::vector<OrderId> live;
+    OrderId next_id = 1;
+    for (std::size_t i = 0; i < 2'000'000; ++i) {
+      ShardedMsg m;
+      m.venue  = static_cast<VenueId>(rng.in(0, 3));
+      m.symbol = static_cast<SymbolId>(rng.in(0, 399));
+      if (!live.empty() && rng.in(1, 100) <= 45) {
+        m.kind = ShardedMsg::Kind::Cancel;
+        const auto k = static_cast<std::size_t>(rng.in(0, static_cast<std::int64_t>(live.size()) - 1));
+        m.cx.id = live[k];
+        live[k] = live.back();
+        live.pop_back();
+      } else {
+        m.kind = ShardedMsg::Kind::New;
+        m.nw.id = next_id++;
+        m.nw.side = rng.in(0, 1) == 0 ? Side::Buy : Side::Sell;
+        m.nw.type = OrderType::Limit;
+        m.nw.tif  = TimeInForce::Day;
+        m.nw.price = std::clamp<Price>(kMid + rng.in(-12, 12), kFloor, kCeil);
+        m.nw.qty   = rng.in(1, 100);
+        live.push_back(m.nw.id);
+      }
+      flow.push_back(m);
+    }
+
+    std::printf("  %8s %12s %14s %10s\n", "shards", "seconds", "msg/sec", "speedup");
+    std::printf("  %s\n", std::string(48, '-').c_str());
+    double base = 0.0;
+    for (std::uint32_t n : {1u, 2u, 4u, 8u, 12u}) {
+      ShardedReplay r(n, kFloor, kCeil);
+      const auto t0 = Clock::now();
+      r.run(flow);
+      const double secs = std::chrono::duration<double>(Clock::now() - t0).count();
+      if (n == 1) base = secs;
+      std::printf("  %8u %12.3f %14.0f %9.2fx\n", n, secs,
+                  static_cast<double>(flow.size()) / secs,
+                  base > 0 ? base / secs : 1.0);
+    }
+  }
+
+  // ---- Sharding scale-out ------------------------------------------------
+  // Caveats stated before the numbers, because they matter more than the
+  // numbers: this runs under WSL2 on a consumer CPU. There is no core pinning,
+  // no isolated cores, no NUMA control, and hyperthread siblings are scheduled
+  // by the OS. The i5-12600KF is also heterogeneous (6 performance cores plus
+  // 4 efficiency cores), so threads 7 and beyond land on slower cores and
+  // scaling is expected to bend there. Treat this as a shape, not a spec.
+  {
+    constexpr std::size_t kMsgs    = 2'000'000;
+    constexpr VenueId     kVenues  = 4;
+    constexpr SymbolId    kSymbols = 400;
+
+    std::printf("  sharding scale-out (%zu messages, %u venues x %u symbols)\n",
+                kMsgs, kVenues, kSymbols);
+    std::printf("  WSL2, no core pinning, no isolation, P+E heterogeneous CPU\n\n");
+
+    Rng rng(0xABCDEF);
+    std::vector<ShardedMsg> flow;
+    flow.reserve(kMsgs);
+    std::vector<OrderId> live;
+    OrderId next_id = 1;
+    for (std::size_t i = 0; i < kMsgs; ++i) {
+      ShardedMsg m;
+      m.venue  = static_cast<VenueId>(rng.in(0, kVenues - 1));
+      m.symbol = static_cast<SymbolId>(rng.in(0, kSymbols - 1));
+      if (!live.empty() && rng.in(1, 100) <= 45) {
+        m.kind  = ShardedMsg::Kind::Cancel;
+        const auto k = static_cast<std::size_t>(rng.in(0, static_cast<std::int64_t>(live.size()) - 1));
+        m.cx.id = live[k];
+        live[k] = live.back();
+        live.pop_back();
+      } else {
+        m.kind = ShardedMsg::Kind::New;
+        m.nw.id = next_id++;
+        m.nw.side = rng.in(0, 1) == 0 ? Side::Buy : Side::Sell;
+        m.nw.type = OrderType::Limit;
+        m.nw.tif  = TimeInForce::Day;
+        m.nw.price = std::clamp<Price>(kMid + rng.in(-12, 12), kFloor, kCeil);
+        m.nw.qty   = rng.in(1, 100);
+        live.push_back(m.nw.id);
+      }
+      flow.push_back(m);
+    }
+
+    std::printf("  %8s %12s %14s %10s\n", "shards", "seconds", "msg/sec", "speedup");
+    std::printf("  %s\n", std::string(48, '-').c_str());
+    double base = 0.0;
+    for (std::uint32_t n : {1u, 2u, 4u, 6u, 8u, 12u}) {
+      ShardedReplay r(n, kFloor, kCeil);
+      const auto t0 = Clock::now();
+      r.run(flow);
+      const double secs = std::chrono::duration<double>(Clock::now() - t0).count();
+      if (n == 1) base = secs;
+      std::printf("  %8u %12.3f %14.0f %9.2fx\n", n, secs,
+                  static_cast<double>(kMsgs) / secs, base / secs);
+    }
+    std::printf("\n");
+  }
+
   std::printf("\n");
   return 0;
 }

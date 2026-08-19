@@ -23,10 +23,10 @@ LIB_SRC  := $(filter-out %_main.cpp,$(wildcard src/*.cpp))
 LIB_OBJ  := $(patsubst src/%.cpp,$(BUILD)/%.o,$(LIB_SRC))
 
 TEST_SRC := $(wildcard tests/*.cpp)
-BENCH_SRC:= $(wildcard bench/*.cpp)
+BENCH_SRC:= bench/bench_main.cpp
 
-.PHONY: all test bench asan tsan replay iex clean fmt
-all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay $(BUILD)/pricetime_iex
+.PHONY: all test bench shardbench asan tsan replay iex clean fmt
+all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay $(BUILD)/pricetime_iex $(BUILD)/pricetime_shardbench
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -46,11 +46,17 @@ $(BUILD)/pricetime_replay: src/replay_main.cpp $(LIB_OBJ) | $(BUILD)
 $(BUILD)/pricetime_iex: src/replay_iex_main.cpp $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
 
+$(BUILD)/pricetime_shardbench: bench/bench_shard.cpp $(LIB_OBJ) | $(BUILD)
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
+
 test: $(BUILD)/pricetime_tests
 	@./$(BUILD)/pricetime_tests
 
 bench: $(BUILD)/pricetime_bench
 	@./$(BUILD)/pricetime_bench
+
+shardbench: $(BUILD)/pricetime_shardbench
+	@./$(BUILD)/pricetime_shardbench
 
 replay: $(BUILD)/pricetime_replay
 	@./$(BUILD)/pricetime_replay
