@@ -13,8 +13,14 @@
 //   you agree to the IEX Historical Data Terms of Use.
 //   https://iextrading.com/iex-historical-data-terms/
 //
+// Two capture container formats appear in the archive and both are supported.
+// IEX's early DEEP+ files are classic libpcap (magic 0xA1B2C3D4); the current
+// ones are pcapng (magic 0x0A0D0D0A). Assuming either one alone fails loudly on
+// the first byte, which is at least an honest failure, but supporting both is
+// twenty lines and the archive genuinely contains both.
+//
 // Layering, outermost first:
-//   libpcap file  (classic, little-endian, magic 0xA1B2C3D4)
+//   capture container  (classic pcap OR pcapng)
 //     Ethernet II  ->  IPv4  ->  UDP
 //       IEX-TP v1 header (40 bytes, little-endian, protocol 0x8005 = DEEP+)
 //         N x [ uint16 length | message payload ]
@@ -29,6 +35,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "pricetime/types.hpp"
 
@@ -93,8 +100,13 @@ class DeepPlusReader {
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
-  bool fill_packet();
+  enum class Container { Pcap, PcapNg };
 
+  bool fill_packet();
+  bool next_frame_pcap(std::vector<char>& frame);
+  bool next_frame_pcapng(std::vector<char>& frame);
+
+  Container   container_ = Container::Pcap;
   std::FILE*  pipe_ = nullptr;
   std::string error_;
 

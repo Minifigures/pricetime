@@ -28,6 +28,8 @@ constexpr std::size_t kEthHeader        = 14;
 constexpr std::size_t kUdpHeader        = 8;
 constexpr std::size_t kIexTpHeader      = 40;
 constexpr std::uint32_t kPcapMagicLE    = 0xA1B2C3D4u;
+constexpr std::uint32_t kPcapNgSHB      = 0x0A0D0D0Au;  // Section Header Block
+constexpr std::uint32_t kPcapNgEPB      = 0x00000006u;  // Enhanced Packet Block
 
 bool read_exact(std::FILE* f, char* dst, std::size_t n) {
   return std::fread(dst, 1, n, f) == n;
@@ -51,23 +53,49 @@ bool DeepPlusReader::open(const std::string& path) {
     error_ = "popen failed for: " + path;
     return false;
   }
-  char gh[kPcapGlobalHeader];
-  if (!read_exact(pipe_, gh, kPcapGlobalHeader)) {
-    error_ = "short read on pcap global header (is the file gzipped pcap?)";
+  char head[8];
+  if (!read_exact(pipe_, head, 8)) {
+    error_ = "short read on capture header (is the file a gzipped capture?)";
     close();
     return false;
   }
-  const auto magic = le<std::uint32_t>(gh);
-  if (magic != kPcapMagicLE) {
-    char buf[96];
-    std::snprintf(buf, sizeof(buf),
-                  "unexpected pcap magic 0x%08X (expected 0x%08X, classic LE)",
-                  magic, kPcapMagicLE);
-    error_ = buf;
-    close();
-    return false;
+  const auto magic = le<std::uint32_t>(head);
+  if (magic == kPcapMagicLE) {
+    container_ = Container::Pcap;
+    char rest[kPcapGlobalHeader - 8];
+    if (!read_exact(pipe_, rest, sizeof(rest))) {
+      error_ = "short read on pcap global header";
+      close();
+      return false;
+    }
+    return true;
   }
-  return true;
+  if (magic == kPcapNgSHB) {
+    container_ = Container::PcapNg;
+    // head holds Block Type + Block Total Length. Consume the remainder of the
+    // Section Header Block; its options are not needed.
+    const auto total = le<std::uint32_t>(head + 4);
+    if (total < 12 || total > (1u << 20)) {
+      error_ = "implausible pcapng section header length";
+      close();
+      return false;
+    }
+    std::vector<char> skip(total - 8);
+    if (!read_exact(pipe_, skip.data(), skip.size())) {
+      error_ = "short read on pcapng section header";
+      close();
+      return false;
+    }
+    return true;
+  }
+  char buf[128];
+  std::snprintf(buf, sizeof(buf),
+                "unrecognised capture magic 0x%08X "
+                "(expected 0x%08X classic pcap or 0x%08X pcapng)",
+                magic, kPcapMagicLE, kPcapNgSHB);
+  error_ = buf;
+  close();
+  return false;
 }
 
 void DeepPlusReader::close() {
@@ -80,15 +108,47 @@ void DeepPlusReader::close() {
   remaining_in_packet_ = 0;
 }
 
-bool DeepPlusReader::fill_packet() {
-  for (;;) {
-    char rh[kPcapRecordHeader];
-    if (!read_exact(pipe_, rh, kPcapRecordHeader)) return false;
-    const auto incl = le<std::uint32_t>(rh + 8);
-    if (incl == 0 || incl > (1u << 20)) return false;  // corrupt or absurd
+// Classic pcap: a 16-byte record header then the frame.
+bool DeepPlusReader::next_frame_pcap(std::vector<char>& frame) {
+  char rh[kPcapRecordHeader];
+  if (!read_exact(pipe_, rh, kPcapRecordHeader)) return false;
+  const auto incl = le<std::uint32_t>(rh + 8);
+  if (incl == 0 || incl > (1u << 20)) return false;
+  frame.resize(incl);
+  return read_exact(pipe_, frame.data(), incl);
+}
 
-    std::vector<char> frame(incl);
-    if (!read_exact(pipe_, frame.data(), incl)) return false;
+// pcapng: a stream of typed blocks. Only Enhanced Packet Blocks carry frames;
+// everything else (interface descriptions, statistics, name resolution) is
+// skipped by its declared length. Frame data is padded to a 32-bit boundary.
+bool DeepPlusReader::next_frame_pcapng(std::vector<char>& frame) {
+  for (;;) {
+    char bh[8];
+    if (!read_exact(pipe_, bh, 8)) return false;
+    const auto type  = le<std::uint32_t>(bh);
+    const auto total = le<std::uint32_t>(bh + 4);
+    if (total < 12 || total > (1u << 24)) return false;
+
+    std::vector<char> body(total - 8);
+    if (!read_exact(pipe_, body.data(), body.size())) return false;
+    if (type != kPcapNgEPB) continue;
+    if (body.size() < 20) continue;
+
+    const auto caplen = le<std::uint32_t>(body.data() + 12);
+    if (caplen == 0 || caplen > body.size() - 20) continue;
+    frame.assign(body.begin() + 20,
+                 body.begin() + 20 + static_cast<std::ptrdiff_t>(caplen));
+    return true;
+  }
+}
+
+bool DeepPlusReader::fill_packet() {
+  std::vector<char> frame;
+  for (;;) {
+    const bool ok = (container_ == Container::Pcap) ? next_frame_pcap(frame)
+                                                    : next_frame_pcapng(frame);
+    if (!ok) return false;
+    const auto incl = static_cast<std::uint32_t>(frame.size());
     ++packets_;
 
     if (incl < kEthHeader + 20 + kUdpHeader + kIexTpHeader) continue;
