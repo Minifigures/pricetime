@@ -55,6 +55,17 @@ class Book {
     return best_ask_ == kNoLevel ? kInvalidPrice : to_price(best_ask_);
   }
   [[nodiscard]] Qty qty_at(Side s, Price p) const noexcept;
+
+  // Top of book in one call. O(1): the touch indices and the per-level running
+  // totals are both already maintained, so this reads them rather than
+  // searching. The consolidator calls this once per venue per symbol on every
+  // NBBO recomputation, so it must not walk anything.
+  [[nodiscard]] Qty bid_size() const noexcept {
+    return best_bid_ == kNoLevel ? 0 : bid_lvls_[best_bid_].total;
+  }
+  [[nodiscard]] Qty ask_size() const noexcept {
+    return best_ask_ == kNoLevel ? 0 : ask_lvls_[best_ask_].total;
+  }
   [[nodiscard]] std::size_t resting_count() const noexcept { return index_.size(); }
   [[nodiscard]] std::vector<std::pair<Price, Qty>> depth(Side s,
                                                          std::size_t levels) const;
