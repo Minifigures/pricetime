@@ -8,7 +8,7 @@ prices execute first; at the same price, whoever arrived first executes first.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 43 tests, including 100k-op differential fuzz
+make test      # 45 tests, including ~200k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
@@ -430,6 +430,49 @@ shards.** If most traffic is one instrument, that instrument's shard does most
 of the work however many shards exist, and adding more only adds scheduling
 overhead. SPY and QQQ carry orders of magnitude more messages than a typical
 name, so this is the real-world case, not the pathological one.
+
+---
+
+## Market surveillance
+
+`make iex` also runs a surveillance pass over the engine's own event stream.
+
+It is **deliberately off the hot path**: the engine emits events, surveillance
+reads them afterwards. Nothing in it can slow a match or change a matching
+decision. Surveillance that can influence execution is not surveillance.
+
+Detected: trade-throughs (Rule 611), locked and crossed markets (Rule 610(e)),
+self-match attempts (CEA 4c(a); cf. the $6.5M CFTC penalty against Coinbase for
+its own programs crossing each other), quote stuffing by cancel-to-trade ratio,
+and fleeting orders.
+
+Real output, AAPL on 2024-12-23:
+
+```
+  observed        : 216,846 rested, 186,652 cancelled, 1,502 traded
+  cancel-to-trade : 124.3:1
+
+  [FLEETING_ORDER] 106,476 orders (49.1% of all resting orders) were
+                   cancelled within 1000 microseconds of arriving
+  [QUOTE_STUFFING] cancel-to-trade 124.3:1, above the 100:1 threshold
+```
+
+**Nearly half of every displayed order on Apple that day existed for under a
+millisecond.** That is a measurement, not an accusation: high cancel rates are
+normal modern market-making behaviour, and the report says so. Every finding
+names the evidence that produced it, and none asserts intent.
+
+### The optional language-model stage, and its boundary
+
+`scripts/explain.sh` turns those findings into prose for a compliance reviewer.
+It is a **separate process** and the boundary is the point: a matching engine
+must be deterministic and auditable, and a language model is neither. It never
+touches a price, a fill, or a matching decision. It is handed numbers the engine
+already computed, told it may not invent any, and told not to assert intent.
+
+With no API key set, the stage prints why it skipped and exits zero. The
+engine's deterministic report is the deliverable; the narrative is a
+convenience over it.
 
 ---
 

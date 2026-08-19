@@ -38,6 +38,7 @@
 
 #include "pricetime/book.hpp"
 #include "pricetime/iex.hpp"
+#include "pricetime/surveillance.hpp"
 
 using namespace pricetime;
 using Clock = std::chrono::steady_clock;
@@ -51,6 +52,7 @@ struct Rec {
   Qty           size;
   Price         price;
   bool          maintain_priority;
+  Nanos         ts;   // venue timestamp, used by surveillance only
 };
 
 std::string fmt_px(Price p) {
@@ -111,7 +113,7 @@ int main(int argc, char** argv) {
       hi = std::max(hi, d.price);
     }
     recs.push_back({d.type, d.order_id, d.side, d.size, d.price,
-                    d.maintain_priority});
+                    d.maintain_priority, d.ts});
   }
   const double decode_secs =
       std::chrono::duration<double>(Clock::now() - decode_start).count();
@@ -198,6 +200,11 @@ int main(int argc, char** argv) {
                 exec_size_mismatch = 0;
   std::uint64_t synth_id = (1ull << 62);  // aggressor ids cannot collide
 
+  // Surveillance runs alongside, reading the engine's own output. It never
+  // feeds back into a matching decision, and it is excluded from the timed
+  // region below so it cannot flatter or penalise the latency numbers.
+  Surveillance surv(chosen);
+
   std::vector<double> ns;
   ns.reserve(recs.size());
 
@@ -259,6 +266,8 @@ int main(int argc, char** argv) {
     const auto t1 = Clock::now();
     ns.push_back(static_cast<double>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+
+    for (const Event& e : log) surv.observe(e, r.ts);
   }
   const double secs = std::chrono::duration<double>(Clock::now() - t_start).count();
 
@@ -301,6 +310,15 @@ int main(int argc, char** argv) {
   std::printf("    printed off reported price : %llu  (IEX price improvement /\n"
               "                                      price sliding; expected)\n",
               static_cast<unsigned long long>(exec_price_improved));
-  std::printf("\n");
+  std::printf("\n%s\n", surv.report().c_str());
+
+  // Machine-readable findings for the optional narrative stage. Written to a
+  // file rather than stdout so the human report above stays readable.
+  if (FILE* jf = std::fopen("surveillance.json", "w")) {
+    std::fprintf(jf, "%s\n", surv.findings_json().c_str());
+    std::fclose(jf);
+    std::printf("  findings written to surveillance.json\n"
+                "  optional narrative: ./scripts/explain.sh surveillance.json\n\n");
+  }
   return 0;
 }
