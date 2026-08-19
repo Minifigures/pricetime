@@ -154,7 +154,7 @@ Stats summarize(std::vector<double>& ns, double total_seconds, std::size_t n) {
   return s;
 }
 
-void print_row(const char* label, const Stats& s) {
+[[maybe_unused]] void print_row(const char* label, const Stats& s) {
   std::printf("  %-22s %8.0f %8.0f %8.0f %8.0f %9.0f %12.0f\n", label, s.p50,
               s.p90, s.p99, s.p999, s.mean, s.ops_per_sec);
 }
