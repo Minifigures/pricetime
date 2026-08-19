@@ -9,6 +9,7 @@
 
 CXX      ?= g++
 STD      := -std=c++20
+LDLIBS   ?= -pthread
 WARN     := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion \
             -Wnon-virtual-dtor -Wold-style-cast -Wcast-align -Wunused \
             -Woverloaded-virtual -Wdouble-promotion -Wformat=2
@@ -24,7 +25,7 @@ LIB_OBJ  := $(patsubst src/%.cpp,$(BUILD)/%.o,$(LIB_SRC))
 TEST_SRC := $(wildcard tests/*.cpp)
 BENCH_SRC:= $(wildcard bench/*.cpp)
 
-.PHONY: all test bench asan replay iex clean fmt
+.PHONY: all test bench asan tsan replay iex clean fmt
 all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay $(BUILD)/pricetime_iex
 
 $(BUILD):
@@ -34,16 +35,16 @@ $(BUILD)/%.o: src/%.cpp | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) -c $< -o $@
 
 $(BUILD)/pricetime_tests: $(TEST_SRC) $(LIB_OBJ) | $(BUILD)
-	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
 
 $(BUILD)/pricetime_bench: $(BENCH_SRC) $(LIB_OBJ) | $(BUILD)
-	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
 
 $(BUILD)/pricetime_replay: src/replay_main.cpp $(LIB_OBJ) | $(BUILD)
-	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
 
 $(BUILD)/pricetime_iex: src/replay_iex_main.cpp $(LIB_OBJ) | $(BUILD)
-	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
 
 test: $(BUILD)/pricetime_tests
 	@./$(BUILD)/pricetime_tests
@@ -61,8 +62,18 @@ iex: $(BUILD)/pricetime_iex
 asan: | $(BUILD)
 	@mkdir -p $(BUILD)/asan
 	$(CXX) $(STD) $(WARN) $(DEBUGOPT) -fsanitize=address,undefined \
-	  -fno-omit-frame-pointer $(INC) $(TEST_SRC) $(LIB_SRC) -o $(BUILD)/asan/tests
+	  -fno-omit-frame-pointer $(INC) $(TEST_SRC) $(LIB_SRC) -o $(BUILD)/asan/tests $(LDLIBS)
 	@ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ./$(BUILD)/asan/tests
+
+# ThreadSanitizer. Separate build dir, and ASLR is disabled via setarch
+# because TSan aborts with "unexpected memory mapping" on WSL2 kernels
+# otherwise. This target found a real data race in the seqlock: the payload
+# was a plain struct, which works on x86 and is undefined behaviour anyway.
+tsan: | $(BUILD)
+	@mkdir -p $(BUILD)/tsan
+	$(CXX) $(STD) -O1 -g -fsanitize=thread -fno-omit-frame-pointer $(INC) \
+	  tests/main.cpp tests/test_sharded.cpp $(LIB_SRC) -o $(BUILD)/tsan/tests $(LDLIBS)
+	@TSAN_OPTIONS=halt_on_error=0 setarch $$(uname -m) -R ./$(BUILD)/tsan/tests
 
 clean:
 	@rm -rf $(BUILD)

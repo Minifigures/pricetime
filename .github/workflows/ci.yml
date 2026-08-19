@@ -30,6 +30,16 @@ jobs:
       - name: AddressSanitizer + UndefinedBehaviorSanitizer
         run: make asan
 
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # This job exists because it caught a real one: the seqlock's payload was
+      # a plain struct, which is a data race under the C++ memory model even
+      # though the version-counter protocol makes it safe on x86 in practice.
+      - name: ThreadSanitizer
+        run: make tsan
+
   benchmark:
     runs-on: ubuntu-latest
     steps:
