@@ -98,6 +98,23 @@ TEST(seqlock_bbo_read_never_tears_under_concurrent_writes) {
   std::atomic<bool> stop{false};
   std::atomic<std::uint64_t> torn{0}, reads{0};
 
+  // Seed a valid quote BEFORE either thread starts.
+  //
+  // Without this the reader can win the race to its first load and observe the
+  // default-constructed slot, where bid_px is kInvalidPrice rather than any
+  // value satisfying the invariant below. That is not a torn read, it is a
+  // read of a state the writer never published, and counting it as a failure
+  // makes the test schedule-dependent: g++ happened to start the writer first
+  // and passed, clang started the reader first and reported 142,695 "tears".
+  // The seqlock was never at fault. Publishing a known-good value first
+  // removes the ambiguity instead of papering over it with a sentinel check.
+  {
+    Bbo seed;
+    seed.bid_px = 10'000; seed.bid_sz = 20'000;
+    seed.ask_px = 10'010; seed.ask_sz = 30'000;
+    slot.publish(seed);
+  }
+
   // Writer publishes only self-consistent quotes: ask is always bid + 10.
   std::thread writer([&] {
     for (Price p = 10'000; !stop.load(std::memory_order_relaxed); ++p) {
@@ -113,7 +130,9 @@ TEST(seqlock_bbo_read_never_tears_under_concurrent_writes) {
     for (int i = 0; i < 400'000; ++i) {
       const Bbo b = slot.read();
       reads.fetch_add(1, std::memory_order_relaxed);
-      if (b.bid_px == 0) continue;  // initial state
+      // Every published quote satisfies ask == bid + 10, bid_sz == bid * 2 and
+      // ask_sz == bid * 3. Any read violating that saw fields from two
+      // different publishes.
       if (b.ask_px != b.bid_px + 10 || b.bid_sz != b.bid_px * 2 ||
           b.ask_sz != b.bid_px * 3)
         torn.fetch_add(1, std::memory_order_relaxed);
