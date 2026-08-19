@@ -1,0 +1,66 @@
+# ---- env / secrets ----
+.env
+.env.*
+!.env.example
+secrets.*
+credentials.*
+*.pem
+*.key
+
+# ---- AI tooling / handoff docs (never commit) ----
+CLAUDE.md
+CLAUDE_NOTES.md
+AGENTS.md
+COWORK.md
+COWORK*.md
+.cowork/
+.claude/
+.cursorrules
+.windsurfrules
+SESSION_NOTES.md
+
+# ---- private docs ----
+PRD.md
+TECHNICAL_ARCHITECTURE.md
+ARCHITECTURE.md
+DEMO_SCRIPT.md
+DEVPOST_SUBMISSION.md
+ROADMAP.md
+NOTES.md
+TODO.md
+docs/PRD*.md
+docs/TECHNICAL_ARCHITECTURE*.md
+docs/ARCHITECTURE*.md
+docs/DEMO*.md
+docs/REHEARSAL*.md
+docs/DEVPOST*.md
+docs/SUBMISSION*.md
+docs/ROADMAP*.md
+docs/INTERNAL*.md
+docs/HANDOFF*.md
+docs/ASSUMPTIONS.md
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# ---- node ----
+node_modules/
+.next/
+out/
+.vercel/
+*.tsbuildinfo
+
+# ---- data / artifacts ----
+data/raw/
+data/cache/
+*.parquet.tmp
+.DS_Store
