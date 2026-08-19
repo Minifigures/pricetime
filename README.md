@@ -8,8 +8,10 @@ prices execute first; at the same price, whoever arrived first executes first.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 38 tests, including 100k-op differential fuzz
+make test      # 43 tests, including 100k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
+make shardbench # throughput vs shard count
+make tsan      # ThreadSanitizer over the concurrent paths
 make replay    # live terminal order book
 ./scripts/fetch_iex.sh && ./build/pricetime_iex data/iex/20241223_DPLS.pcap.gz AAPL
 ```
@@ -204,8 +206,8 @@ the resulting book state is identical (best bid, best ask, resting count, eight
 levels of depth per side).
 
 **Coverage: 100,000 randomized operations** across three self-trade policies and
-26 seeded campaigns, plus 23 hand-written behavioural tests and 11 consolidation
-tests. The NBBO is separately fuzzed across four venues against an independent
+26 seeded campaigns, plus 23 hand-written behavioural tests, 11 consolidation
+tests, and 5 sharding tests. The NBBO is separately fuzzed across four venues against an independent
 naive walk of every level of every venue.
 
 Two details borrowed from better engineers:
@@ -367,12 +369,77 @@ date, and the free Nasdaq samples do not overlap the IEX DEEP+ archive.
 
 ---
 
+## Sharding across cores
+
+No book is ever written by more than one thread. A book belongs to one shard, a
+shard belongs to one thread, and a message routes to its shard by hashing
+(venue, symbol) through splitmix64 — dense small ids would otherwise cluster
+badly on a power-of-two shard count. Inside a shard the engine is the same
+single-threaded code the differential fuzz already validated, so threading
+introduces no new matching semantics to get wrong.
+
+This is the single-writer principle, and the reason for it is measured rather
+than assumed. LMAX published: 500M increments take 300 ms on one thread,
+10,000 ms with a lock, and **224,000 ms with two threads contending that lock**.
+Three orders of magnitude, to protect an increment.
+
+Cross-shard reads (an NBBO must read every venue's touch, and those live on
+different threads) go through a **seqlock**, not a mutex: readers never block
+writers, which matters because the writer is the hot path.
+
+### Determinism is the acceptance criterion, not throughput
+
+The same input replayed on 2, 4 and 8 shards must produce **byte-identical
+per-book event streams** to serial execution. Six seeds, 20,000 messages each.
+If that fails, the sharding is wrong and no throughput number redeems it.
+
+### ThreadSanitizer found a bug my own test could not
+
+The first seqlock stored its payload as a plain struct and relied on the
+version counter to prevent torn reads. I wrote a test that hammered it with
+**400,000 concurrent reads against a live writer and saw zero tears**, because
+x86 is forgiving.
+
+TSan reported it as a data race anyway, and TSan was right: concurrent
+non-atomic access is undefined behaviour under the C++ memory model whatever
+protocol sits on top, and the compiler is entitled to assume races never
+happen. The payload is now relaxed atomics ordered by two fences — the same
+loads and stores on x86, but actually defined. TSan is clean and `make tsan`
+plus a CI job keep it that way.
+
+Passing your own test is not the same as being correct.
+
+### Scaling, including where it stops
+
+```
+12 hardware threads (6 performance + 4 efficiency cores) · 4M messages
+WSL2: no core pinning, no core isolation, no huge pages
+```
+
+| shards | uniform, 256 symbols | 60% of flow on one symbol |
+|---|---|---|
+| 1 | 1.49 M msg/s | 1.98 M msg/s |
+| 2 | 2.48 (1.66x) | 2.47 (1.25x) |
+| 4 | 4.11 (2.75x) | 3.43 (1.73x) |
+| 8 | 5.00 (3.35x) | 6.02 (3.04x) |
+| 12 | **6.15 (4.12x)** | **4.05 (2.04x)** |
+
+The hot-symbol column is the interesting one, and it is measured precisely
+because uniform distribution flatters any sharding scheme. **It regresses at 12
+shards.** If most traffic is one instrument, that instrument's shard does most
+of the work however many shards exist, and adding more only adds scheduling
+overhead. SPY and QQQ carry orders of magnitude more messages than a typical
+name, so this is the real-world case, not the pathological one.
+
+---
+
 ## What this is not
 
-- **Single-threaded.** No sharding across cores. A real venue shards by symbol;
-  this would be one shard.
 - **No wire protocol.** No FIX, ITCH, OUCH or SBE for order entry. Orders arrive
   as structs.
+- **Sharding is batch, not streaming.** Messages are partitioned up front and
+  each shard's slice is replayed on its own thread. A live venue needs an
+  ingress sequencer establishing total order before fan-out; that is not here.
 - **No persistence, sequencing, or failover.** The event stream is the natural
   journal and the engine is deterministic, so replay-based recovery is the
   obvious next step. Not implemented. Given that two of the three failures cited
@@ -396,6 +463,8 @@ date, and the free Nasdaq samples do not overlap the IEX DEEP+ archive.
 | `make test` | Correctness and differential suites |
 | `make bench` | Latency and throughput across four regimes |
 | `make asan` | Rebuild under AddressSanitizer + UBSan and run tests |
+| `make tsan` | Rebuild under ThreadSanitizer and run the concurrent tests |
+| `make shardbench` | Throughput against shard count |
 | `make replay` | Live terminal order book |
 | `./scripts/fetch_iex.sh` | Download a real trading day (~1.7 GB) |
 
