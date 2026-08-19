@@ -418,17 +418,26 @@ WSL2: no core pinning, no core isolation, no huge pages
 
 | shards | uniform, 256 symbols | 60% of flow on one symbol |
 |---|---|---|
-| 1 | 1.49 M msg/s | 1.98 M msg/s |
-| 2 | 2.48 (1.66x) | 2.47 (1.25x) |
-| 4 | 4.11 (2.75x) | 3.43 (1.73x) |
-| 8 | 5.00 (3.35x) | 6.02 (3.04x) |
-| 12 | **6.15 (4.12x)** | **4.05 (2.04x)** |
+| 1 | 2.09 M msg/s | 2.55 M msg/s |
+| 2 | 4.20 (2.02x) | 3.99 (1.57x) |
+| 4 | 8.38 (4.02x) | 7.95 (3.12x) |
+| 6 | 11.33 (5.43x) | 8.58 (3.36x) |
+| 8 | 14.76 (7.07x) | **13.99 (5.48x)** |
+| 12 | **18.80 (9.01x)** | 10.45 (4.09x) |
+
+An earlier version of this table reported 4.12x uniform rather than 9.01x. That
+version was wrong, and how it was wrong is worth keeping: each book was
+pre-allocating an order pool sized for a single busy instrument, so 1,024 books
+reserved over 3 GB before processing a message. The benchmark was measuring
+allocator pressure, not the engine. Peak RSS on the CI-sized run went from
+~3.2 GB to 424 MB once books started small and grew on demand, and the real
+scaling appeared underneath.
 
 The hot-symbol column is the interesting one, and it is measured precisely
-because uniform distribution flatters any sharding scheme. **It regresses at 12
-shards.** If most traffic is one instrument, that instrument's shard does most
-of the work however many shards exist, and adding more only adds scheduling
-overhead. SPY and QQQ carry orders of magnitude more messages than a typical
+because uniform distribution flatters any sharding scheme. **It peaks at 8 shards and regresses at 12**,
+from 5.48x down to 4.09x. If most traffic is one instrument, that instrument's
+shard does most of the work however many shards exist, and adding more only
+adds scheduling overhead. SPY and QQQ carry orders of magnitude more messages than a typical
 name, so this is the real-world case, not the pathological one.
 
 ---
