@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <thread>
@@ -88,7 +89,14 @@ double run_once(std::uint32_t shards, const std::vector<ShardedMsg>& flow) {
 }  // namespace
 
 int main() {
-  constexpr std::size_t kOps = 4'000'000;
+  // Same override as bench_main: CI runs a small smoke workload because a
+  // shared runner cannot hold 4M pre-generated messages, and its timings would
+  // be meaningless if it could.
+  const char* env = std::getenv("PRICETIME_BENCH_OPS");
+  const std::size_t kOps =
+      (env != nullptr && std::atoll(env) > 0)
+          ? static_cast<std::size_t>(std::atoll(env))
+          : 4'000'000;
   std::printf("pricetime sharding scalability\n");
   std::printf("  hardware_concurrency : %u\n", std::thread::hardware_concurrency());
   std::printf("  messages per run     : %zu\n", kOps);

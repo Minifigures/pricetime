@@ -44,7 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Runs to prove the harness is not bit-rotting. CI numbers are noisy
-      # on shared runners and are NOT the numbers in the README.
+      # Proves the harness still runs. CI numbers are noisy on a shared runner
+      # and are NOT the numbers in the README, which come from a stated
+      # machine. The small workload also keeps the job inside the runner's
+      # memory: the full run pre-generates ~100 MB of flow per regime and was
+      # being OOM-killed.
       - name: Benchmark smoke
-        run: make bench CXX=g++ OPT="-O2 -DNDEBUG"
+        env:
+          PRICETIME_BENCH_OPS: "20000"
+        run: |
+          make bench CXX=g++ OPT="-O2 -DNDEBUG"
+          make shardbench CXX=g++ OPT="-O2 -DNDEBUG"

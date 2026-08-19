@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -202,8 +203,20 @@ Stats run(Engine& eng, const std::vector<Op>& ops, bool collect) {
 }  // namespace
 
 int main() {
-  constexpr std::size_t kWarmup = 100'000;
-  constexpr std::size_t kOps    = 1'000'000;
+  // Workload size is overridable so CI can run this as a smoke test.
+  //
+  // The full run pre-generates ~100 MB of order flow per regime and the
+  // reference engine holds a deep book on top of that, which OOM-kills a
+  // GitHub runner. The published percentiles come from a known machine and say
+  // so; CI's job is only to prove the harness has not bit-rotted, so it sets
+  // PRICETIME_BENCH_OPS low rather than pretending a shared runner produces
+  // meaningful latency numbers.
+  const char* env = std::getenv("PRICETIME_BENCH_OPS");
+  const std::size_t kOps =
+      (env != nullptr && std::atoll(env) > 0)
+          ? static_cast<std::size_t>(std::atoll(env))
+          : 1'000'000;
+  const std::size_t kWarmup = std::min<std::size_t>(100'000, kOps / 4 + 1);
 
   std::printf("pricetime benchmark\n");
   std::printf("  operations per regime : %zu (after %zu warmup)\n", kOps, kWarmup);
