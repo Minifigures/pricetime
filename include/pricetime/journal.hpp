@@ -75,6 +75,13 @@ struct JournalRecord {
 
 // Bytes on disk per record: u32 payload_len, payload, u32 crc32(payload).
 inline constexpr std::uint32_t kJournalMagic   = 0x50544A31u;  // "PTJ1"
+// Written by close() after the last record. Recovery uses it to tell a journal
+// that ended because the writer finished from one that ended because the
+// process died. Without it, a crash that happens to land on a record boundary
+// is indistinguishable from a clean shutdown, and recovery reports "clean"
+// while silently having lost every input after the cut. The value is far above
+// kMaxRecordBytes so it can never be mistaken for a record length.
+inline constexpr std::uint32_t kJournalEnd     = 0x454E4421u;  // "END!"
 inline constexpr std::size_t   kMaxRecordBytes = 4096;
 
 class Journal {
@@ -86,9 +93,15 @@ class Journal {
   void close();
 
   // Appends one record. When `durable` is set, fsyncs before returning, which
-  // is what a venue would do and is roughly 1000x slower. Off by default so
-  // the benchmark measures the engine rather than the disk.
-  [[nodiscard]] bool append(const JournalRecord& r, bool durable = false);
+  // is what a venue would do and is roughly 1000x slower.
+  //
+  // On by default, because the entire point of journalling before applying is
+  // that a record survives the process. With buffering left on, append()
+  // returns true as soon as the bytes reach a stdio buffer, so a kill loses
+  // every input still in that buffer even though the engine had already
+  // matched and acknowledged them. Pass false only where the durability is
+  // genuinely not the thing being measured.
+  [[nodiscard]] bool append(const JournalRecord& r, bool durable = true);
   [[nodiscard]] std::uint64_t records() const noexcept { return records_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
@@ -100,6 +113,10 @@ class Journal {
     std::uint64_t bytes_read     = 0;
     std::uint64_t bytes_discarded = 0;
     bool          clean          = true;   // false when a torn tail was found
+    // True only when the writer's end marker was found, which means every
+    // record it wrote is present. `clean` is weaker: it says the byte stream
+    // ended on a record boundary, which a crash can also produce.
+    bool          complete       = false;
     std::string   note;
   };
   [[nodiscard]] static RecoveryReport recover(const std::string& path);
@@ -111,6 +128,7 @@ class Journal {
  private:
   std::FILE*    f_ = nullptr;
   std::uint64_t records_ = 0;
+  bool          poisoned_ = false;
   std::string   error_;
 };
 

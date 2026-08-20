@@ -113,15 +113,33 @@ bool Journal::create(const std::string& path) {
     error_ = "short write on header"; close(); return false;
   }
   records_ = 0;
+  poisoned_ = false;
+  error_.clear();
   return true;
 }
 
 void Journal::close() {
-  if (f_ != nullptr) { std::fclose(f_); f_ = nullptr; }
+  if (f_ == nullptr) return;
+  // Mark the stream finished so recovery can distinguish "the writer stopped
+  // here on purpose" from "the process died here". Best effort: if this fails
+  // the journal is simply reported incomplete, which is the safe direction.
+  if (!poisoned_) {
+    std::vector<char> end;
+    Writer{end}.u32(kJournalEnd);
+    if (std::fwrite(end.data(), 1, end.size(), f_) != end.size())
+      error_ = "short write on end marker";
+  }
+  if (std::fclose(f_) != 0 && error_.empty())
+    error_ = "fclose failed, the tail of the journal may not be on disk";
+  f_ = nullptr;
 }
 
 bool Journal::append(const JournalRecord& r, bool durable) {
   if (f_ == nullptr) { error_ = "journal not open"; return false; }
+  // A failed append can leave a partial frame, and recovery stops at the first
+  // torn record. Everything written after one would be unreachable, so refuse
+  // to keep going rather than accumulate records nobody can ever read back.
+  if (poisoned_) { error_ = "journal poisoned by an earlier failed append"; return false; }
   std::vector<char> payload;
   encode(r, payload);
 
@@ -132,15 +150,15 @@ bool Journal::append(const JournalRecord& r, bool durable) {
   Writer{frame}.u32(crc32(payload.data(), payload.size()));
 
   if (std::fwrite(frame.data(), 1, frame.size(), f_) != frame.size()) {
-    error_ = "short write"; return false;
+    error_ = "short write"; poisoned_ = true; return false;
   }
   if (durable) {
     // flush the C buffer, then ask the OS to actually put it on the platter.
     // Without the second step the data is in the page cache and a power loss
     // takes it; with it, this is roughly a thousand times slower per record.
-    if (std::fflush(f_) != 0) { error_ = "fflush failed"; return false; }
+    if (std::fflush(f_) != 0) { error_ = "fflush failed"; poisoned_ = true; return false; }
 #ifndef _WIN32
-    if (::fsync(::fileno(f_)) != 0) { error_ = "fsync failed"; return false; }
+    if (::fsync(::fileno(f_)) != 0) { error_ = "fsync failed"; poisoned_ = true; return false; }
 #endif
   }
   ++records_;
@@ -183,9 +201,10 @@ Journal::RecoveryReport Journal::recover(const std::string& path) {
     }
   }
   off = 4;
+  rep.bytes_read = off;   // the header is read whether or not a record follows
 
   for (;;) {
-    if (off == buf.size()) break;                       // clean end
+    if (off == buf.size()) break;                       // ended on a boundary
     if (off + 4 > buf.size()) {                          // torn length prefix
       rep.clean = false;
       rep.bytes_discarded = buf.size() - off;
@@ -194,6 +213,17 @@ Journal::RecoveryReport Journal::recover(const std::string& path) {
     }
     Reader lr{buf.data() + off, buf.data() + off + 4};
     const std::uint32_t len = lr.u32();
+    if (len == kJournalEnd) {          // the writer finished here
+      off += 4;
+      rep.bytes_read = off;
+      rep.complete = true;
+      if (off != buf.size()) {
+        rep.clean = false;
+        rep.bytes_discarded = buf.size() - off;
+        rep.note = "trailing bytes after the end marker";
+      }
+      break;
+    }
     if (len == 0 || len > kMaxRecordBytes) {
       rep.clean = false;
       rep.bytes_discarded = buf.size() - off;

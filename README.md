@@ -14,7 +14,7 @@ actually fill at.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 70 tests, including ~550k-op differential fuzz
+make test      # 92 tests, including ~550k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
@@ -716,8 +716,33 @@ those operations live.
 
 **16,807 cut points. 16,406 of them landed mid-record. All correct.**
 
+The expected record count at each cut is computed independently, from the
+frame offsets, rather than from whatever recovery happened to return. That
+distinction matters: deriving the expectation from the result means a recovery
+that silently drops records still passes, and this test used to do exactly
+that. Sabotaging `recover()` to drop one record now fails it at cut 56.
+
+Two things that had to be fixed before the claim above meant what it sounds
+like it means:
+
+- **A crash can land exactly on a record boundary**, and then the byte stream
+  is structurally perfect: no torn tail, no bad checksum, nothing discarded.
+  Recovery called that "clean" and said nothing more, so an operator concluded
+  nothing had rewound while the inputs after the cut were gone. `close()` now
+  writes an end marker, and recovery reports `complete` separately from
+  `clean`. `clean` describes the bytes. Only `complete` says the writer
+  finished.
+- **Journalling before applying only means something if the write is durable.**
+  `append()` buffered by default, so it returned success as soon as the bytes
+  reached a stdio buffer, and a kill lost every input still sitting there even
+  though the engine had already matched and acknowledged them. Durable is now
+  the default; the cost is roughly a thousand times per record, and that is
+  the correct trade for the thing this exists to guarantee.
+
 Corruption inside a record is caught by the checksum and stops recovery there.
-A foreign file is rejected rather than misread.
+A foreign file is rejected rather than misread. An append that fails poisons
+the journal, because recovery stops at the first torn record and anything
+written after one would be unreachable.
 
 ```
 1. RUNNING    journalled 5000 inputs while matching

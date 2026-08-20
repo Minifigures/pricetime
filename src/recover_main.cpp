@@ -149,6 +149,15 @@ int main(int argc, char** argv) {
   std::printf("              tail: %s%s%s\n",
               rep.clean ? kGreen : kYell,
               rep.clean ? "clean" : rep.note.c_str(), kReset);
+  // A crash can land exactly on a record boundary, and then the byte stream
+  // looks perfect: no torn tail, nothing discarded. Only the writer's end
+  // marker distinguishes "it finished" from "it died here tidily", so report
+  // that separately rather than letting a clean tail imply completeness.
+  std::printf("              writer: %s%s%s\n",
+              rep.complete ? kGreen : kYell,
+              rep.complete ? "reached the end marker, nothing after this was lost"
+                           : "no end marker, the process stopped before closing",
+              kReset);
   std::printf("              book: bid %s / ask %s, %zu resting\n",
               rebuilt.best_bid() == kInvalidPrice ? "-" : px(rebuilt.best_bid()).c_str(),
               rebuilt.best_ask() == kInvalidPrice ? "-" : px(rebuilt.best_ask()).c_str(),

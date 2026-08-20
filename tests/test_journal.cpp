@@ -169,12 +169,49 @@ TEST(recovery_is_correct_from_a_crash_at_every_byte_offset) {
   const std::vector<char> bytes = read_all(full);
   CHECK(bytes.size() > 100);
 
+  // Walk the frame boundaries once, so each cut has an INDEPENDENTLY computed
+  // expected record count. Deriving the expectation from rep.records.size(),
+  // as this test used to, means a recover() that silently drops records still
+  // passes: the expected state is recomputed to match whatever came back.
+  std::vector<std::size_t> boundary;      // byte offset after each whole record
+  {
+    std::size_t off = 4;
+    while (off + 4 <= bytes.size()) {
+      std::uint32_t len = 0;
+      for (int i = 0; i < 4; ++i)
+        len |= static_cast<std::uint32_t>(
+                   static_cast<unsigned char>(bytes[off + static_cast<std::size_t>(i)]))
+               << (8 * i);
+      if (len == kJournalEnd || len == 0 || len > kMaxRecordBytes) break;
+      off += 4 + len + 4;
+      if (off > bytes.size()) break;
+      boundary.push_back(off);
+    }
+  }
+  CHECK_EQ(boundary.size(), ops.size());
+
   const auto part = tmp_path("part");
   std::size_t checked = 0, torn = 0;
 
   for (std::size_t cut = 0; cut <= bytes.size(); ++cut) {
     write_bytes(part, bytes.data(), cut);
     const auto rep = Journal::recover(part);
+
+    // How many whole records physically fit inside this prefix.
+    std::size_t expect = 0;
+    while (expect < boundary.size() && boundary[expect] <= cut) ++expect;
+    if (rep.records.size() != expect) {
+      std::fprintf(stderr,
+                   "\n      cut at %zu: recovered %zu records, %zu were intact\n",
+                   cut, rep.records.size(), expect);
+      CHECK(false); return;
+    }
+
+    // Only a prefix cut at exactly the end can be complete.
+    if (rep.complete && cut != bytes.size()) {
+      std::fprintf(stderr, "\n      cut at %zu reported complete\n", cut);
+      CHECK(false); return;
+    }
 
     // Whatever survived must be a PREFIX of what was written, and replaying it
     // must equal running exactly that many ops live. A recovery that invents,
@@ -247,5 +284,98 @@ TEST(an_empty_journal_recovers_to_an_empty_book) {
   const auto rep = Journal::recover(path);
   CHECK(rep.clean);
   CHECK(rep.records.empty());
+  std::remove(path.c_str());
+}
+
+// A journal the writer closed normally carries its end marker, so recovery can
+// state positively that every record written is present.
+TEST(a_normally_closed_journal_recovers_as_complete) {
+  const auto ops = make_ops(7, 60);
+  const auto path = tmp_path("complete");
+  CHECK(write_journal(path, ops));
+  const auto rep = Journal::recover(path);
+  CHECK(rep.complete);
+  CHECK(rep.clean);
+  CHECK_EQ(rep.records.size(), ops.size());
+  std::remove(path.c_str());
+}
+
+// The one that mattered. A crash can land exactly on a record boundary, and
+// then the byte stream looks structurally perfect: no torn tail, no bad CRC,
+// nothing discarded. Recovery used to call that "clean" and say nothing else,
+// so an operator reading the report concluded nothing had rewound while the
+// inputs after the cut were gone. `clean` still describes the bytes. Only
+// `complete` says the writer got to the end.
+TEST(a_crash_on_a_record_boundary_is_clean_but_not_complete) {
+  const auto ops = make_ops(11, 80);
+  const auto full = tmp_path("boundary_full");
+  CHECK(write_journal(full, ops));
+  const std::vector<char> bytes = read_all(full);
+
+  // Find a boundary partway through and cut exactly there.
+  std::size_t off = 4, cut = 0, kept = 0;
+  while (off + 4 <= bytes.size()) {
+    std::uint32_t len = 0;
+    for (int i = 0; i < 4; ++i)
+      len |= static_cast<std::uint32_t>(
+                 static_cast<unsigned char>(bytes[off + static_cast<std::size_t>(i)]))
+             << (8 * i);
+    if (len == kJournalEnd || len == 0 || len > kMaxRecordBytes) break;
+    off += 4 + len + 4;
+    ++kept;
+    if (kept == ops.size() / 2) { cut = off; break; }
+  }
+  CHECK(cut > 4);
+
+  const auto part = tmp_path("boundary_part");
+  write_bytes(part, bytes.data(), cut);
+  const auto rep = Journal::recover(part);
+
+  CHECK_EQ(rep.records.size(), kept);
+  CHECK(rep.clean);              // the bytes really do end on a boundary
+  CHECK(!rep.complete);          // but the writer never got to say it was done
+  CHECK(kept < ops.size());      // and inputs really were lost
+  std::remove(full.c_str());
+  std::remove(part.c_str());
+}
+
+// Accounting has to add up, including when nothing recovers. bytes_read used
+// to omit the four-byte file header, so the invariant broke on every prefix
+// that contained the header and no complete record.
+TEST(recovery_byte_accounting_covers_the_whole_file) {
+  const auto ops = make_ops(3, 40);
+  const auto full = tmp_path("acct_full");
+  CHECK(write_journal(full, ops));
+  const std::vector<char> bytes = read_all(full);
+
+  const auto part = tmp_path("acct_part");
+  for (std::size_t cut = 4; cut <= bytes.size(); ++cut) {
+    write_bytes(part, bytes.data(), cut);
+    const auto rep = Journal::recover(part);
+    if (rep.bytes_read + rep.bytes_discarded != cut) {
+      std::fprintf(stderr,
+                   "\n      cut %zu: read %llu + discarded %llu != %zu\n", cut,
+                   static_cast<unsigned long long>(rep.bytes_read),
+                   static_cast<unsigned long long>(rep.bytes_discarded), cut);
+      CHECK(false); return;
+    }
+  }
+  CHECK(true);
+  std::remove(full.c_str());
+  std::remove(part.c_str());
+}
+
+// An append that fails leaves a partial frame, and recovery stops at the first
+// torn record, so anything written after one would be unreachable. The journal
+// refuses rather than accumulating records nobody can read back.
+TEST(a_poisoned_journal_refuses_further_appends) {
+  const auto path = tmp_path("poison");
+  Journal j;
+  CHECK(j.create(path));
+  const auto ops = make_ops(5, 3);
+  for (const auto& r : ops) CHECK(j.append(r));
+  j.close();
+  // Appending to a closed journal must fail rather than silently succeed.
+  CHECK(!j.append(ops[0]));
   std::remove(path.c_str());
 }
