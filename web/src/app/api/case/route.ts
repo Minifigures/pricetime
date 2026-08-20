@@ -13,6 +13,8 @@
 // remains the source of truth. With no API key configured the detections are
 // still complete and still correct; only the prose is missing.
 
+import { pick } from "./providers";
+
 export const runtime = "edge";
 
 interface Finding {
@@ -50,10 +52,10 @@ Paragraph 3: the specific next check a reviewer should run to separate the two.
 Under 200 words. Plain sentences. No em dashes.`;
 
 export async function POST(req: Request): Promise<Response> {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) {
+  const chosen = pick(process.env as Record<string, string | undefined>);
+  if (!chosen) {
     return new Response(
-      "No ANTHROPIC_API_KEY is configured, so the narrative stage is off.\n\n" +
+      "No model key is configured, so the narrative stage is off.\n\n" +
         "This is a supported state, not a failure. The detections beside this " +
         "panel are produced by the engine itself and are complete without it. " +
         "This stage only rewrites those same findings as prose for a reviewer.",
@@ -74,37 +76,21 @@ export async function POST(req: Request): Promise<Response> {
     });
   }
 
-  const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-5",
-      max_tokens: 700,
-      system: SYSTEM,
-      stream: true,
-      messages: [
-        {
-          role: "user",
-          content:
-            "Surveillance output follows. Write the case note.\n\n" +
-            JSON.stringify(
-              { symbol: body.symbol, stats: body.stats, book: body.book, findings: body.findings },
-              null,
-              1,
-            ),
-        },
-      ],
-    }),
-  });
+  const userMsg =
+    "Surveillance output follows. Write the case note.\n\n" +
+    JSON.stringify(
+      { symbol: body.symbol, stats: body.stats, book: body.book, findings: body.findings },
+      null,
+      1,
+    );
+  const { url, init } = chosen.provider.request(chosen.key, SYSTEM, userMsg);
+  const upstream = await fetch(url, init);
 
   if (!upstream.ok || upstream.body === null) {
     const detail = await upstream.text().catch(() => "");
     return new Response(
-      `The narrative stage could not reach the model (${upstream.status}). ` +
+      `The narrative stage could not reach ${chosen.provider.name} ` +
+        `(${upstream.status}). ` +
         `The detections beside this panel are unaffected.\n\n${detail.slice(0, 300)}`,
       { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
     );
@@ -131,12 +117,8 @@ export async function POST(req: Request): Promise<Response> {
         const raw = line.slice(5).trim();
         if (raw === "" || raw === "[DONE]") continue;
         try {
-          const ev = JSON.parse(raw) as {
-            type?: string;
-            delta?: { type?: string; text?: string };
-          };
-          if (ev.type === "content_block_delta" && ev.delta?.text)
-            controller.enqueue(encoder.encode(ev.delta.text));
+          const text = chosen.provider.delta(JSON.parse(raw));
+          if (text) controller.enqueue(encoder.encode(text));
         } catch {
           // A partial frame; the carry buffer picks it up next round.
         }
