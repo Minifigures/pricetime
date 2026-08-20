@@ -14,7 +14,7 @@ actually fill at.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 68 tests, including ~500k-op differential fuzz
+make test      # 70 tests, including ~550k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths

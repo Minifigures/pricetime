@@ -79,10 +79,12 @@ std::size_t run_campaign(std::uint64_t seed, std::size_t ops,
                          Price hot_ticks = Book::kDefaultHotTicks,
                          Allocation alloc = Allocation::Fifo,
                          int fifo_pct = kDefaultFifoPercent,
-                         int time_weight = kDefaultTimeWeight) {
+                         int time_weight = kDefaultTimeWeight,
+                         std::size_t expected_orders = 1u << 16) {
   Rng rng(seed);
   ReferenceBook ref(stp, alloc, fifo_pct, time_weight);
-  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks, alloc, fifo_pct, time_weight);
+  Book fast(kFloor, kCeil, stp, expected_orders, hot_ticks, alloc, fifo_pct,
+            time_weight);
 
   std::vector<OrderId> live;
   OrderId next_id = 1;
@@ -193,6 +195,29 @@ TEST(differential_stp_cancel_aggressor) {
 TEST(differential_two_tier_cold_path) {
   for (std::uint64_t seed = 300; seed <= 312; ++seed)
     CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::None, 64), 4000u);
+}
+
+// The node pool grows by doubling when the free list runs dry, and every
+// other campaign here pre-sizes it to 65,536 so that path never runs. Starting
+// at four nodes forces a dozen or more reallocations mid-campaign. Book indexes
+// its pool rather than pointing into it, which is what makes the growth safe,
+// so this test exists to keep that property from being refactored away.
+TEST(differential_node_pool_growth) {
+  for (std::uint64_t seed = 700; seed <= 706; ++seed)
+    CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::None,
+                          Book::kDefaultHotTicks, Allocation::Fifo,
+                          kDefaultFifoPercent, kDefaultTimeWeight, 4),
+             4000u);
+}
+
+// Same, with the cold tier active as well, so growth and tier migration
+// interleave instead of being exercised one at a time.
+TEST(differential_node_pool_growth_with_cold_tier) {
+  for (std::uint64_t seed = 800; seed <= 804; ++seed)
+    CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::None, 64,
+                          Allocation::Fifo, kDefaultFifoPercent,
+                          kDefaultTimeWeight, 4),
+             4000u);
 }
 
 TEST(differential_two_tier_boundary_straddling) {
