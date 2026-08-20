@@ -113,14 +113,19 @@ export function EnginePanel(): React.JSX.Element {
   // so the divisor only moves when total visible depth moves. Scaling to the
   // largest single level instead makes every bar jump whenever one level
   // trades, which reads as noise rather than as depth.
+  // The engine returns more levels than the ladder shows, and the divisor has
+  // to come from the deepest row the reader can actually see. Taking it from a
+  // level below the fold makes the visible bars never reach full width and
+  // lets invisible depth move the scale.
+  const ROWS = 8;
   const cum = (ls: readonly Level[]): number[] => {
     let run = 0;
-    return ls.map((l) => (run += l[1]));
+    return ls.slice(0, ROWS).map((l) => (run += l[1]));
   };
   const bidCum = cum(snap.bids);
   const askCum = cum(snap.asks);
   const scale = Math.max(1, bidCum[bidCum.length - 1] ?? 0, askCum[askCum.length - 1] ?? 0);
-  const rows = Array.from({ length: 8 }, (_, i) => i);
+  const rows = Array.from({ length: ROWS }, (_, i) => i);
   const spread = snap.bid > 0 && snap.ask > 0 ? snap.ask - snap.bid : null;
   const mid = snap.bid > 0 && snap.ask > 0 ? (snap.bid + snap.ask) / 2 : 0;
 
@@ -131,7 +136,7 @@ export function EnginePanel(): React.JSX.Element {
   const quote = ((): null | { qty: number; avg: number; slip: number; notional: number } => {
     if (!sweep || mid === 0) return null;
     const side = sweep.side === "bid" ? snap.bids : snap.asks;
-    const take = side.slice(0, sweep.row + 1);
+    const take = side.slice(0, Math.min(sweep.row + 1, ROWS));
     if (take.length === 0) return null;
     const qty = take.reduce((a, l) => a + l[1], 0);
     if (qty === 0) return null;

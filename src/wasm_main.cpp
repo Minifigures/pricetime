@@ -7,9 +7,12 @@
 // depth snapshot, because passing structs across the WASM boundary is not
 // worth the ceremony for a demo.
 //
-// Build:  emcc -O3 -std=c++20 -Iinclude src/wasm_main.cpp src/book.cpp \
+// Build:  em++ -O3 -std=c++20 -Iinclude \
+//              src/wasm_main.cpp src/book.cpp src/reference_book.cpp \
 //              -o web/public/pricetime.js -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
 //              -sMODULARIZE -sEXPORT_NAME=PricetimeModule -sALLOW_MEMORY_GROWTH
+//
+// em++, not emcc: emcc links as C and leaves operator delete undefined.
 
 #include <emscripten/emscripten.h>
 
@@ -67,6 +70,19 @@ struct Sim {
 };
 
 Sim& sim() { static Sim s; return s; }
+
+// snprintf truncates silently on overflow. The numeric line below outgrew a
+// 96-byte buffer once the counters reached seven digits, which cut the JSON
+// mid-key ("diverged": with no value) and left JSON.parse throwing on every
+// tick after a few minutes. Size for the worst case and refuse to append a
+// fragment rather than emit malformed JSON.
+template <typename... Args>
+void append_fmt(std::string& out, const char* fmt, Args... args) {
+  char buf[512];
+  const int n = std::snprintf(buf, sizeof(buf), fmt, args...);
+  if (n > 0 && static_cast<std::size_t>(n) < sizeof(buf)) out += buf;
+}
+
 
 }  // namespace
 
@@ -158,42 +174,35 @@ EMSCRIPTEN_KEEPALIVE const char* pt_snapshot() {
   const auto a = s.book.depth(Side::Sell, 10);
   std::string& j = s.json;
   j = "{\"bids\":[";
-  char buf[96];
   for (std::size_t i = 0; i < b.size(); ++i) {
-    std::snprintf(buf, sizeof(buf), "%s[%lld,%lld]", i ? "," : "",
-                  static_cast<long long>(b[i].first),
-                  static_cast<long long>(b[i].second));
-    j += buf;
+    append_fmt(j, "%s[%lld,%lld]", i ? "," : "",
+               static_cast<long long>(b[i].first),
+               static_cast<long long>(b[i].second));
   }
   j += "],\"asks\":[";
   for (std::size_t i = 0; i < a.size(); ++i) {
-    std::snprintf(buf, sizeof(buf), "%s[%lld,%lld]", i ? "," : "",
-                  static_cast<long long>(a[i].first),
-                  static_cast<long long>(a[i].second));
-    j += buf;
+    append_fmt(j, "%s[%lld,%lld]", i ? "," : "",
+               static_cast<long long>(a[i].first),
+               static_cast<long long>(a[i].second));
   }
   j += "],\"tape\":[";
   for (std::size_t i = 0; i < s.tape.size(); ++i) {
-    std::snprintf(buf, sizeof(buf), "%s[%lld,%lld]", i ? "," : "",
-                  static_cast<long long>(s.tape[i].first),
-                  static_cast<long long>(s.tape[i].second));
-    j += buf;
+    append_fmt(j, "%s[%lld,%lld]", i ? "," : "",
+               static_cast<long long>(s.tape[i].first),
+               static_cast<long long>(s.tape[i].second));
   }
   const Price bb = s.book.best_bid(), ba = s.book.best_ask();
-  std::snprintf(buf, sizeof(buf), "],\"bid\":%lld,\"ask\":%lld,",
-                static_cast<long long>(bb == kInvalidPrice ? 0 : bb),
-                static_cast<long long>(ba == kInvalidPrice ? 0 : ba));
-  j += buf;
-  std::snprintf(buf, sizeof(buf),
-                "\"msgs\":%llu,\"trades\":%llu,\"vol\":%lld,\"resting\":%zu,"
-                "\"ns\":%.0f,\"compared\":%llu,\"diverged\":%llu,",
-                static_cast<unsigned long long>(s.msgs),
-                static_cast<unsigned long long>(s.trades),
-                static_cast<long long>(s.vol), s.book.resting_count(),
-                s.last_ns,
-                static_cast<unsigned long long>(s.compared),
-                static_cast<unsigned long long>(s.diverged));
-  j += buf;
+  append_fmt(j, "],\"bid\":%lld,\"ask\":%lld,",
+             static_cast<long long>(bb == kInvalidPrice ? 0 : bb),
+             static_cast<long long>(ba == kInvalidPrice ? 0 : ba));
+  append_fmt(j, "\"msgs\":%llu,\"trades\":%llu,\"vol\":%lld,\"resting\":%zu,",
+             static_cast<unsigned long long>(s.msgs),
+             static_cast<unsigned long long>(s.trades),
+             static_cast<long long>(s.vol), s.book.resting_count());
+  append_fmt(j, "\"ns\":%.0f,\"compared\":%llu,\"diverged\":%llu,",
+             s.last_ns,
+             static_cast<unsigned long long>(s.compared),
+             static_cast<unsigned long long>(s.diverged));
   j += "\"last\":\"";
   for (char c : s.last_line) { if (c != '"' && c != '\\') j += c; }
   j += "\"}";

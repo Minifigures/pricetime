@@ -593,7 +593,14 @@ happen. The payload is now relaxed atomics ordered by two fences, the same
 loads and stores on x86, but actually defined. TSan is clean and `make tsan`
 plus a CI job keep it that way.
 
-Passing your own test is not the same as being correct.
+With one caveat worth stating, since the whole point of this section is not
+overclaiming: GCC warns `'atomic_thread_fence' is not supported with
+'-fsanitize=thread'` on this exact code. TSan models atomics but not standalone
+fences, so a clean run proves the accesses are atomic, not that the fences
+order them correctly. That part rests on the memory model and on review.
+
+Passing your own test is not the same as being correct, and neither is passing
+somebody else's tool.
 
 ### Scaling, including where it stops
 

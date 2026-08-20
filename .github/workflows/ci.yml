@@ -55,3 +55,40 @@ jobs:
         run: |
           make bench CXX=g++ OPT="-O2 -DNDEBUG"
           make shardbench CXX=g++ OPT="-O2 -DNDEBUG"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # src/wasm_main.cpp is compiled by no other job, so a break in it used to
+      # ship silently: the committed .wasm would simply stay stale and the page
+      # would keep serving the previous build. This compiles it for real.
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.7
+          actions-cache-folder: emsdk-cache
+      - name: Build the engine to WebAssembly
+        run: |
+          em++ -O3 -std=c++20 -Iinclude \
+            src/wasm_main.cpp src/book.cpp src/reference_book.cpp \
+            -o /tmp/pricetime.js \
+            -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
+            -sMODULARIZE -sEXPORT_NAME=PricetimeModule -sALLOW_MEMORY_GROWTH
+      # A byte-compare against the committed artifact is not used here: emcc
+      # output is not reproducible across toolchain versions or build paths,
+      # so it would go red for reasons that have nothing to do with the code.
+      # This job's job is to prove src/wasm_main.cpp still compiles.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc --noEmit
+      - name: Build
+        working-directory: web
+        run: npm run build
