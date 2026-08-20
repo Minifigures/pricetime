@@ -8,11 +8,12 @@ prices execute first; at the same price, whoever arrived first executes first.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 45 tests, including ~200k-op differential fuzz
+make test      # 51 tests, including ~200k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
 make replay    # live terminal order book
+make recover   # journal, crash, recover, prove it
 ./scripts/fetch_iex.sh && ./build/pricetime_iex data/iex/20241223_DPLS.pcap.gz AAPL
 ```
 
@@ -207,7 +208,7 @@ levels of depth per side).
 
 **Coverage: 100,000 randomized operations** across three self-trade policies and
 26 seeded campaigns, plus 23 hand-written behavioural tests, 11 consolidation
-tests, and 5 sharding tests. The NBBO is separately fuzzed across four venues against an independent
+tests, 5 sharding tests, and 6 journal and recovery tests. The NBBO is separately fuzzed across four venues against an independent
 naive walk of every level of every venue.
 
 Two details borrowed from better engineers:
@@ -485,6 +486,70 @@ convenience over it.
 
 ---
 
+## Crash recovery
+
+```
+make recover
+```
+
+This README opens with three real failures, and **two of them were not matching
+bugs at all, they were recovery failures.** Nasdaq's Facebook IPO cross failed
+over to an engine whose state was frozen nineteen minutes earlier, excluding
+38,000 orders. NYSE ran primary and backup simultaneously and could not answer
+whether 2,800 opening auctions had happened, because no authoritative record
+existed to ask.
+
+Both are the same shape: state existed in one place, and there was no way to
+rebuild it somewhere else and prove the rebuild was right.
+
+**The journal records inputs, not outputs.** That works only because the engine
+is deterministic: the same inputs in the same order produce the same book and
+the same event stream. So the inputs are the smaller, more durable thing to
+persist and the outputs are derivable. LMAX phrase it exactly: *"the current
+state of the Business Logic Processor is entirely derivable by processing the
+input events."*
+
+Records are length-prefixed and CRC-32 checksummed. Recovery stops at the first
+record that fails to verify rather than salvaging past it, because a torn tail
+is the *expected* shape of a process dying mid-append, not an exceptional case.
+The on-disk format writes every field explicitly rather than memcpy'ing a
+struct, so a compiler changing its layout cannot silently change the format.
+
+### Verified by killing it at every possible instant
+
+`tests/test_journal.cpp` truncates the journal at **every byte offset in turn**
+and demands that what recovers is a prefix of what was written, and that
+replaying it produces byte-identical events and book state to running exactly
+those operations live.
+
+**16,807 cut points. 16,406 of them landed mid-record. All correct.**
+
+Corruption inside a record is caught by the checksum and stops recovery there.
+A foreign file is rejected rather than misread.
+
+```
+1. RUNNING    journalled 5000 inputs while matching
+              book: bid 99.79 / ask 100.05, 410 resting, 2558 trades
+2. CRASH      process killed mid-append
+              journal was 214931 bytes, 3616 bytes lost (cut at byte 211315)
+3. RECOVERY   read 4914 records from a cold start
+              tail: torn record at tail
+4. VERDICT    compared against an independent live run of the same 4914 inputs
+              event streams byte-identical : yes
+              book state identical         : yes
+              inputs lost to the crash     : 86 of 5000
+```
+
+That last line is the honest part. Inputs after the cut are genuinely gone, and
+an operator learns exactly how far the world rewound rather than being told
+everything is fine.
+
+**Not replication, consensus, or failover.** One journal on one disk. Getting
+from here to a replicated state machine is the next problem and a much larger
+one.
+
+---
+
 ## What this is not
 
 - **No wire protocol.** No FIX, ITCH, OUCH or SBE for order entry. Orders arrive
@@ -492,11 +557,13 @@ convenience over it.
 - **Sharding is batch, not streaming.** Messages are partitioned up front and
   each shard's slice is replayed on its own thread. A live venue needs an
   ingress sequencer establishing total order before fan-out; that is not here.
-- **No persistence, sequencing, or failover.** The event stream is the natural
-  journal and the engine is deterministic, so replay-based recovery is the
-  obvious next step. Not implemented. Given that two of the three failures cited
-  at the top of this README were *recovery* failures rather than matching bugs,
-  this is the most important thing missing.
+- **No replication, no consensus, no failover.** Recovery from a local journal
+  exists (above); surviving the loss of the *machine* does not. A real venue
+  replicates the input stream to standbys and needs a sequencer establishing
+  total order before fan-out. That is the next problem and it is much larger.
+- **No ingress sequencing.** Sharded replay is batch: messages are partitioned
+  up front. A live venue must establish total order at ingress, which is the
+  single-writer bottleneck every exchange architecture is organised around.
 - **One allocation model.** Price-time FIFO. CME alone runs ten (FIFO, Pro-Rata,
   Allocation, Configurable, Threshold Pro-Rata, and variants with Lead Market
   Maker steps), exposed per-instrument in FIX tag 1142.
@@ -518,6 +585,7 @@ convenience over it.
 | `make tsan` | Rebuild under ThreadSanitizer and run the concurrent tests |
 | `make shardbench` | Throughput against shard count |
 | `make replay` | Live terminal order book |
+| `make recover` | Journal a run, crash it, recover, verify against a live replay |
 | `./scripts/fetch_iex.sh` | Download a real trading day (~1.7 GB) |
 
 Requires g++ 13+ and make. Warning set is `-Wall -Wextra -Wpedantic -Wshadow

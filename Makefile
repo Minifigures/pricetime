@@ -25,8 +25,8 @@ LIB_OBJ  := $(patsubst src/%.cpp,$(BUILD)/%.o,$(LIB_SRC))
 TEST_SRC := $(wildcard tests/*.cpp)
 BENCH_SRC:= bench/bench_main.cpp
 
-.PHONY: all test bench shardbench asan tsan replay iex clean fmt
-all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay $(BUILD)/pricetime_iex $(BUILD)/pricetime_shardbench
+.PHONY: all test bench shardbench asan tsan replay iex recover clean fmt
+all: $(BUILD)/pricetime_tests $(BUILD)/pricetime_bench $(BUILD)/pricetime_replay $(BUILD)/pricetime_iex $(BUILD)/pricetime_shardbench $(BUILD)/pricetime_recover
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -55,6 +55,9 @@ $(BUILD)/pricetime_iex: src/replay_iex_main.cpp $(LIB_OBJ) | $(BUILD)
 $(BUILD)/pricetime_shardbench: bench/bench_shard.cpp $(LIB_OBJ) | $(BUILD)
 	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
 
+$(BUILD)/pricetime_recover: src/recover_main.cpp $(LIB_OBJ) | $(BUILD)
+	$(CXX) $(STD) $(WARN) $(OPT) $(INC) $^ -o $@ $(LDLIBS)
+
 test: $(BUILD)/pricetime_tests
 	@./$(BUILD)/pricetime_tests
 
@@ -66,6 +69,9 @@ shardbench: $(BUILD)/pricetime_shardbench
 
 replay: $(BUILD)/pricetime_replay
 	@./$(BUILD)/pricetime_replay
+
+recover: $(BUILD)/pricetime_recover
+	@./$(BUILD)/pricetime_recover
 
 iex: $(BUILD)/pricetime_iex
 	@echo 'usage: ./build/pricetime_iex <IEX_DPLS.pcap.gz> [SYMBOL]'
