@@ -53,10 +53,22 @@ void ShardedReplay::run(const std::vector<ShardedMsg>& msgs) {
         // reallocations on the few hot names during warmup; the alternative is
         // reserving for the worst case on every name simultaneously.
         constexpr std::size_t kPerBookOrders = 1u << 10;
+
+        // The same argument applies to the flat ladder, and fixing only the
+        // pool left the larger half in place. Book's default hot band is
+        // 262,144 ticks, which is 16 bytes a level across two sides, so 8 MB
+        // per book before a single order arrives. That is the 8 GB the pool
+        // change was supposed to have cured, at more than twice the size.
+        //
+        // A per-symbol book in a sharded replay is not the single-symbol case
+        // the wide default is tuned for: quotes cluster tightly around one
+        // price, and anything outside the band still works through the cold
+        // ordered map. 1,024 ticks keeps each ladder at 32 KB.
+        constexpr Price kPerBookHotTicks = 1'024;
         bit = sh.books
                   .emplace(key, std::make_unique<Book>(
                                     floor_, ceil_, SelfTradePolicy::None,
-                                    kPerBookOrders))
+                                    kPerBookOrders, kPerBookHotTicks))
                   .first;
       }
       Book& book = *bit->second;
