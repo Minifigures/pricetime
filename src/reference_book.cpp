@@ -12,12 +12,55 @@ struct MatchResult {
 // differs between buying and selling is the map's comparator, which already
 // puts the most aggressive price at begin(), and the crosses() asymmetry.
 // Writing this twice is how the two sides drift apart.
+// Pro-rata allocation across one price level.
+//
+// Each eligible order is offered floor(open_i * want / total). The floor is not
+// a detail: with any realistic mix of sizes the shares almost never divide
+// evenly, so a remainder always exists and something has to place it. CME
+// resolves that with a FIFO step, and states outright that pro-rata is never
+// the last step of an algorithm for exactly this reason.
+//
+// Timestamps are deliberately NOT consulted in the proportional step. That is
+// what makes pro-rata pro-rata: a large order that arrived a moment ago
+// outranks a small one that has been resting all day, which is the whole
+// economic point and the whole reason it changes participant behaviour.
+//
+// Returns per-order allocations aligned to `level`, summing to at most `want`.
+std::vector<Qty> prorata_shares(const std::vector<RestingOrder>& level,
+                                const std::vector<bool>& eligible, Qty want) {
+  std::vector<Qty> share(level.size(), 0);
+  Qty total = 0;
+  for (std::size_t i = 0; i < level.size(); ++i)
+    if (eligible[i]) total += level[i].open;
+  if (total <= 0 || want <= 0) return share;
+
+  for (std::size_t i = 0; i < level.size(); ++i) {
+    if (!eligible[i]) continue;
+    // 128-bit intermediate. open and want are both int64 and their product
+    // overflows int64 for realistic book sizes; a silent wrap would hand
+    // someone an enormous fill. __int128 is a GCC/Clang extension rather than
+    // standard C++, so the pedantic warning is silenced here specifically
+    // rather than dropped from the build, and the alternative (splitting the
+    // multiply around the division) is harder to read for no benefit on the
+    // two compilers this targets.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+    const auto num = static_cast<__int128>(level[i].open) * want;
+#pragma GCC diagnostic pop
+    Qty q = static_cast<Qty>(num / total);
+    q = std::min(q, level[i].open);
+    q = std::min(q, want);
+    share[i] = q;
+  }
+  return share;
+}
+
 template <class SideMap>
 MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
                      Qty want, OrderId aggr_id, ParticipantId aggr_owner,
                      SelfTradePolicy stp, Seq& next_seq, EventLog& out,
                      std::unordered_map<OrderId, std::pair<Side, Price>>& live,
-                     Side contra_side) {
+                     Side contra_side, Allocation alloc) {
   MatchResult res;
   Qty remaining = want;
 
@@ -27,6 +70,36 @@ MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
     if (!crosses(aggressor_side, limit, px)) break;
 
     auto& level = lvl_it->second;
+
+    // Pro-rata runs a proportional pass first, then falls through to the FIFO
+    // loop below to place the rounding remainder. Under FIFO this pass is
+    // skipped entirely and behaviour is unchanged.
+    if (alloc == Allocation::ProRata && remaining > 0 && !level.empty()) {
+      std::vector<bool> eligible(level.size(), true);
+      if (stp != SelfTradePolicy::None && aggr_owner != kAnonymous)
+        for (std::size_t k = 0; k < level.size(); ++k)
+          if (level[k].owner == aggr_owner) eligible[k] = false;
+
+      const auto share = prorata_shares(level, eligible, remaining);
+      // Emit in level order so the event stream stays deterministic.
+      for (std::size_t k = 0; k < level.size() && remaining > 0; ++k) {
+        const Qty q = std::min(share[k], remaining);
+        if (q <= 0) continue;
+        out.push_back(make_trade(aggr_id, level[k].id, aggressor_side, px, q,
+                                 next_seq++));
+        level[k].open -= q;
+        remaining     -= q;
+        res.filled    += q;
+      }
+      // Drop anything the proportional pass fully consumed.
+      for (std::size_t k = level.size(); k-- > 0;) {
+        if (level[k].open == 0) {
+          live.erase(level[k].id);
+          level.erase(level.begin() + static_cast<std::ptrdiff_t>(k));
+        }
+      }
+    }
+
     std::size_t i = 0;
     while (i < level.size() && remaining > 0) {
       RestingOrder& ro = level[i];
@@ -158,9 +231,9 @@ void ReferenceBook::submit(const NewOrder& o, EventLog& out) {
   const MatchResult mr =
       (o.side == Side::Buy)
           ? do_match(asks_, o.side, limit, o.qty, o.id, o.owner, stp_,
-                     next_seq_, out, live_, Side::Sell)
+                     next_seq_, out, live_, Side::Sell, alloc_)
           : do_match(bids_, o.side, limit, o.qty, o.id, o.owner, stp_,
-                     next_seq_, out, live_, Side::Buy);
+                     next_seq_, out, live_, Side::Buy, alloc_);
 
   const Qty remainder = o.qty - mr.filled;
   if (remainder <= 0) return;

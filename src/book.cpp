@@ -5,8 +5,8 @@
 namespace pricetime {
 
 Book::Book(Price floor_px, Price ceil_px, SelfTradePolicy stp,
-           std::size_t expected_orders, Price hot_ticks)
-    : floor_(floor_px), ceil_(ceil_px), stp_(stp) {
+           std::size_t expected_orders, Price hot_ticks, Allocation alloc)
+    : floor_(floor_px), ceil_(ceil_px), stp_(stp), alloc_(alloc) {
   // The hot ladder is centred on the accepted band and clamped to it. When the
   // accepted band is already small (the synthetic benchmarks, most tests) the
   // whole thing is hot and the cold tier never sees a level.
@@ -299,6 +299,50 @@ void Book::submit(const NewOrder& o, EventLog& out) {
     Level* Lp = find_level(cside, px);
     if (Lp == nullptr) break;
     Level& L = *Lp;
+
+    // Proportional pass. Mirrors ReferenceBook::prorata_shares exactly; the
+    // differential fuzz across policies is what keeps them that way.
+    if (alloc_ == Allocation::ProRata && remaining > 0 && L.head != kNil) {
+      pr_nodes_.clear();
+      pr_share_.clear();
+      Qty total = 0;
+      for (Idx n = L.head; n != kNil; n = pool_[n].next) {
+        const bool self_match = stp_ != SelfTradePolicy::None &&
+                                o.owner != kAnonymous &&
+                                pool_[n].owner == o.owner;
+        pr_nodes_.push_back(n);
+        if (self_match) { pr_share_.push_back(-1); }        // -1 marks skip
+        else            { pr_share_.push_back(0); total += pool_[n].open; }
+      }
+      if (total > 0) {
+        for (std::size_t k = 0; k < pr_nodes_.size(); ++k) {
+          if (pr_share_[k] < 0) continue;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+          const auto num = static_cast<__int128>(pool_[pr_nodes_[k]].open) * remaining;
+#pragma GCC diagnostic pop
+          Qty q = static_cast<Qty>(num / total);
+          q = std::min(q, pool_[pr_nodes_[k]].open);
+          pr_share_[k] = q;
+        }
+        for (std::size_t k = 0; k < pr_nodes_.size() && remaining > 0; ++k) {
+          if (pr_share_[k] <= 0) continue;
+          const Idx n = pr_nodes_[k];
+          const Qty q = std::min(pr_share_[k], remaining);
+          out.push_back(make_trade(o.id, pool_[n].id, o.side, px, q, next_seq_++));
+          pool_[n].open -= q;
+          L.total       -= q;
+          remaining     -= q;
+          if (pool_[n].open == 0) {
+            index_.erase(pool_[n].id);
+            const Idx nx = pool_[n].next, p2 = pool_[n].prev;
+            if (p2 != kNil) pool_[p2].next = nx; else L.head = nx;
+            if (nx != kNil) pool_[nx].prev = p2; else L.tail = p2;
+            free_node(n);
+          }
+        }
+      }
+    }
 
     while (L.head != kNil && remaining > 0) {
       const Idx n = L.head;

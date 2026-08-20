@@ -84,6 +84,34 @@ enum class SelfTradePolicy : std::uint8_t {
   CancelAggressor // cancel the incoming order's remainder
 };
 
+// How an incoming order's quantity is divided among the resting orders at a
+// price level once price priority has already selected that level.
+//
+// FIFO is not the only answer, and treating it as the only answer is a
+// parochialism of equity markets. CME exposes the algorithm per instrument in
+// FIX tag 1142 and runs ten of them; Eurex runs three; ICE runs a time-weighted
+// pro-rata on its short-term-rate products. The choice is not cosmetic: it
+// changes what participants do. Field and Large (CFS WP 2008/40) found pro-rata
+// one-tick futures markets sit at the minimum spread with depth around 100x
+// mean trade size and cancellation rates above 96 percent, because rationing by
+// size makes traders submit orders far larger than they intend to fill.
+//
+// Implemented here:
+//
+//   Fifo     Price-time priority. The oldest order at the price fills first.
+//            What most equity venues use.
+//
+//   ProRata  Each resting order receives a share proportional to its size,
+//            rounded DOWN, and the rounding remainder is then distributed
+//            FIFO. Timestamps are not consulted in the proportional step.
+//            Pro-rata is never the last step precisely because of the
+//            rounding; something has to place the leftovers.
+enum class Allocation : std::uint8_t { Fifo = 0, ProRata = 1 };
+
+[[nodiscard]] constexpr const char* to_string(Allocation a) noexcept {
+  return a == Allocation::Fifo ? "FIFO" : "PRO-RATA";
+}
+
 enum class RejectReason : std::uint8_t {
   None = 0,
   DuplicateOrderId,

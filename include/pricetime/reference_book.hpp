@@ -30,8 +30,9 @@ namespace pricetime {
 // ---------------------------------------------------------------------------
 class ReferenceBook {
  public:
-  explicit ReferenceBook(SelfTradePolicy stp = SelfTradePolicy::None) noexcept
-      : stp_(stp) {}
+  explicit ReferenceBook(SelfTradePolicy stp = SelfTradePolicy::None,
+                         Allocation alloc = Allocation::Fifo) noexcept
+      : stp_(stp), alloc_(alloc) {}
 
   void submit(const NewOrder& o, EventLog& out);
   void cancel(const CancelOrder& c, EventLog& out);
@@ -92,6 +93,7 @@ class ReferenceBook {
   // run the volumes that actually find bugs.
   std::unordered_map<OrderId, std::pair<Side, Price>> live_;
   SelfTradePolicy stp_ = SelfTradePolicy::None;
+  Allocation      alloc_ = Allocation::Fifo;
   Seq next_seq_ = 1;
 };
 

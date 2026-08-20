@@ -76,10 +76,11 @@ int combo_key(OrderType t, TimeInForce f, Side s) {
 // Without this the cold path would be dead code that still shipped.
 std::size_t run_campaign(std::uint64_t seed, std::size_t ops,
                          SelfTradePolicy stp,
-                         Price hot_ticks = Book::kDefaultHotTicks) {
+                         Price hot_ticks = Book::kDefaultHotTicks,
+                         Allocation alloc = Allocation::Fifo) {
   Rng rng(seed);
-  ReferenceBook ref(stp);
-  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks);
+  ReferenceBook ref(stp, alloc);
+  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks, alloc);
 
   std::vector<OrderId> live;
   OrderId next_id = 1;
@@ -198,6 +199,22 @@ TEST(differential_two_tier_boundary_straddling) {
   // between the bitmap and the map in both directions.
   for (std::uint64_t seed = 400; seed <= 410; ++seed)
     CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::CancelResting, 1000), 4000u);
+}
+
+// The whole fuzz again under pro-rata. Allocation changes who gets filled at
+// a level, which is the most intricate part of matching, so it gets the same
+// treatment as everything else rather than being trusted because the unit
+// tests in test_allocation.cpp pass.
+TEST(differential_prorata_allocation) {
+  for (std::uint64_t seed = 500; seed <= 515; ++seed)
+    CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::None,
+                          Book::kDefaultHotTicks, Allocation::ProRata), 4000u);
+}
+
+TEST(differential_prorata_with_self_trade_prevention) {
+  for (std::uint64_t seed = 600; seed <= 610; ++seed)
+    CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::CancelResting,
+                          Book::kDefaultHotTicks, Allocation::ProRata), 4000u);
 }
 
 TEST(all_combinations_exercised) {

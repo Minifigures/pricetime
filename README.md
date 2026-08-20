@@ -8,7 +8,7 @@ prices execute first; at the same price, whoever arrived first executes first.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 51 tests, including ~200k-op differential fuzz
+make test      # 58 tests, including ~300k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
@@ -195,6 +195,48 @@ and no decrement mode.
 
 ---
 
+## Allocation is a choice, not a given
+
+```cpp
+Book b(floor, ceil, SelfTradePolicy::None, pool, hot_ticks, Allocation::ProRata);
+```
+
+Price priority selects the level. What happens *within* a level, once several
+orders sit at the same price, is a separate decision, and treating FIFO as the
+only answer is a parochialism of equity markets. CME exposes the algorithm
+per-instrument in FIX tag 1142 and runs ten of them; Eurex runs three; ICE uses
+a time-weighted pro-rata on short-term-rate products.
+
+**FIFO**: the oldest order at the price fills first.
+
+**Pro-rata**: each resting order receives a share proportional to its size,
+rounded **down**, and the rounding remainder is then distributed FIFO. Pro-rata
+is never the last step of an algorithm precisely because of that rounding;
+something has to place the leftovers.
+
+Timestamps are deliberately not consulted in the proportional step. A large
+order that arrived a moment ago outranks a small one that has rested all day,
+and that asymmetry is the whole point:
+
+```
+resting: 10 (oldest)  and  90 (newest),  aggressor buys 50
+  FIFO      ->  10 fills 10, 90 fills 40      (arrival wins)
+  PRO-RATA  ->  10 fills  5, 90 fills 45      (size wins)
+```
+
+**Why it matters beyond mechanics.** Field & Large (CFS WP 2008/40) found that
+pro-rata one-tick futures markets sit at the minimum spread essentially always,
+with depth around **100x mean trade size** and cancellation rates **above 96
+percent** — because rationing by size makes traders submit orders far larger
+than they intend to fill. The allocation rule changes what participants *do*,
+not just who gets filled.
+
+Both policies run the full differential fuzz, because allocation is the most
+intricate part of matching and unit tests passing is not sufficient reason to
+trust it.
+
+---
+
 ## Correctness
 
 The fast book is not obviously correct, because it is fast. So it is not asked
@@ -209,7 +251,8 @@ levels of depth per side).
 
 **Coverage: 100,000 randomized operations** across three self-trade policies and
 26 seeded campaigns, plus 23 hand-written behavioural tests, 11 consolidation
-tests, 5 sharding tests, and 6 journal and recovery tests. The NBBO is separately fuzzed across four venues against an independent
+tests, 5 sharding tests, 6 journal and recovery tests, and 5 allocation
+tests. The differential campaigns run under both FIFO and pro-rata. The NBBO is separately fuzzed across four venues against an independent
 naive walk of every level of every venue.
 
 Two details borrowed from better engineers:
@@ -616,9 +659,9 @@ one.
 - **No ingress sequencing.** Sharded replay is batch: messages are partitioned
   up front. A live venue must establish total order at ingress, which is the
   single-writer bottleneck every exchange architecture is organised around.
-- **One allocation model.** Price-time FIFO. CME alone runs ten (FIFO, Pro-Rata,
-  Allocation, Configurable, Threshold Pro-Rata, and variants with Lead Market
-  Maker steps), exposed per-instrument in FIX tag 1142.
+- **Two allocation models, not ten.** FIFO and pro-rata are implemented (see
+  below). CME alone runs ten, adding top-order priority, Lead Market Maker
+  allocations, configurable FIFO/pro-rata splits and leveling steps.
 - **The order index is `std::unordered_map`.** Measured and found *not* to be
   the bottleneck, so it stays documented rather than optimized.
 - **Benchmarked on WSL2**, no core pinning, no isolated cores, no huge pages.
