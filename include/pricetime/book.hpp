@@ -169,7 +169,12 @@ class Book {
   // level crosses, which made the cost scale with the configured band rather
   // than with book depth.
   [[nodiscard]] Qty available_against(Side aggressor, Price limit,
-                                      Qty wanted) const;
+                                      Qty wanted, ParticipantId owner) const;
+  // Size at a level the given aggressor could actually take. Identical to
+  // L.total unless self-trade prevention is on and the aggressor owns some of
+  // it, in which case that part is not fillable by them and must not count
+  // toward an all-or-nothing decision.
+  [[nodiscard]] Qty fillable_at(const Level& L, ParticipantId owner) const;
   void rest_order(const NewOrder& o, Qty qty, Seq stamp, EventLog& out);
 
   Price floor_ = 0, ceil_ = 0;          // accepted price band (rejects outside)

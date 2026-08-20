@@ -85,7 +85,11 @@ class ReferenceBook {
   using Bids = std::map<Price, Level, std::greater<Price>>;
   using Asks = std::map<Price, Level, std::less<Price>>;
 
-  [[nodiscard]] Qty available_against(Side aggressor, Price limit) const;
+  // `owner` is needed because self-trade prevention makes the aggressor's own
+  // resting size unfillable by it, and an all-or-nothing decision must not
+  // count size it is about to refuse.
+  [[nodiscard]] Qty available_against(Side aggressor, Price limit,
+                                      ParticipantId owner) const;
   void rest(const RestingOrder& ro);
   void remove_from_level(Side s, Price p, OrderId id);
 

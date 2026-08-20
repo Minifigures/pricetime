@@ -209,7 +209,18 @@ Qty Book::qty_at(Side s, Price p) const noexcept {
   return L == nullptr ? 0 : L->total;
 }
 
-Qty Book::available_against(Side aggressor, Price limit, Qty wanted) const {
+Qty Book::fillable_at(const Level& L, ParticipantId owner) const {
+  // Fast path: with no self-trade policy, or an anonymous aggressor, every
+  // resting order at the level is fillable and the running total is exact.
+  if (stp_ == SelfTradePolicy::None || owner == kAnonymous) return L.total;
+  Qty q = 0;
+  for (Idx n = L.head; n != kNil; n = pool_[n].next)
+    if (pool_[n].owner != owner) q += pool_[n].open;
+  return q;
+}
+
+Qty Book::available_against(Side aggressor, Price limit, Qty wanted,
+                            ParticipantId owner) const {
   // Walks both tiers merged in price order, stopping at the first level the
   // aggressor cannot reach, or as soon as `wanted` is covered. The FOK
   // precheck asks a yes/no question, so counting past the answer is work
@@ -242,7 +253,8 @@ Qty Book::available_against(Side aggressor, Price limit, Qty wanted) const {
       const bool take_hot = (cp == kInvalidPrice) || (hp != kInvalidPrice && hp <= cp);
       const Price px = take_hot ? hp : cp;
       if (!crosses(aggressor, limit, px)) break;
-      total += take_hot ? ask_lvls_[hot].total : cit->second.total;
+      total += take_hot ? fillable_at(ask_lvls_[hot], owner)
+                        : fillable_at(cit->second, owner);
       if (total >= wanted) return total;
       if (take_hot) hot = scan_up(ask_bm_, hot + 1u); else ++cit;
     }
@@ -255,7 +267,8 @@ Qty Book::available_against(Side aggressor, Price limit, Qty wanted) const {
       const bool take_hot = (cp == kInvalidPrice) || (hp != kInvalidPrice && hp >= cp);
       const Price px = take_hot ? hp : cp;
       if (!crosses(aggressor, limit, px)) break;
-      total += take_hot ? bid_lvls_[hot].total : cit->second.total;
+      total += take_hot ? fillable_at(bid_lvls_[hot], owner)
+                        : fillable_at(cit->second, owner);
       if (total >= wanted) return total;
       if (take_hot) hot = (hot == 0 ? kNoLevel : scan_down(bid_bm_, hot - 1u));
       else ++cit;
@@ -313,7 +326,8 @@ void Book::submit(const NewOrder& o, EventLog& out) {
                           ? (o.side == Side::Buy ? ceil_ : floor_)
                           : o.price;
 
-  if (o.tif == TimeInForce::FOK && available_against(o.side, limit, o.qty) < o.qty)
+  if (o.tif == TimeInForce::FOK &&
+      available_against(o.side, limit, o.qty, o.owner) < o.qty)
     return reject(RejectReason::FokUnfillable);
 
   Event acc;

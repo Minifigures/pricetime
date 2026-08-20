@@ -194,3 +194,57 @@ TEST(fok_precheck_answers_correctly_on_both_sides_of_the_boundary) {
   CHECK(!has_kind(no, Event::Kind::Trade));
   CHECK_EQ(b.resting_count(), 8u);
 }
+
+// FOK means fill the whole quantity or do nothing at all. Self-trade
+// prevention means the aggressor's own resting size is not fillable by it. The
+// precheck summed level totals with no owner filter, so it counted size STP
+// was about to refuse, passed an order that could not fill, and then STP
+// cancelled the resting order on the way through. The order filled nothing AND
+// destroyed the sender's own position, which is the opposite of what both
+// mechanisms exist to do.
+//
+// Both engines had this identically, so the differential fuzz passed: it
+// compares them against each other, and they agreed on the wrong answer. This
+// is the category a differential method cannot cover, and it needs a direct
+// assertion instead.
+TEST(fok_does_not_count_size_that_self_trade_prevention_will_refuse) {
+  Book b(kFloor, kCeil, SelfTradePolicy::CancelResting);
+  EventLog rest;
+  NewOrder mine = limit(1, Side::Sell, 10'000, 10);
+  mine.owner = 7;
+  b.submit(mine, rest);
+  CHECK_EQ(b.resting_count(), 1u);
+
+  // The only size at this price is my own, so an FOK from me cannot fill.
+  EventLog log;
+  NewOrder fok = limit(2, Side::Buy, 10'000, 10);
+  fok.owner = 7;
+  fok.tif = TimeInForce::FOK;
+  b.submit(fok, log);
+
+  CHECK(has_reject(log, RejectReason::FokUnfillable));
+  CHECK(!has_kind(log, Event::Kind::Trade));
+  // And crucially the resting order must survive: a rejected FOK does nothing.
+  CHECK_EQ(b.resting_count(), 1u);
+  CHECK_EQ(b.best_ask(), static_cast<Price>(10'000));
+}
+
+// The same book, but the resting size belongs to someone else, so the FOK is
+// genuinely fillable and must go through.
+TEST(fok_still_fills_against_another_participant) {
+  Book b(kFloor, kCeil, SelfTradePolicy::CancelResting);
+  EventLog rest;
+  NewOrder theirs = limit(1, Side::Sell, 10'000, 10);
+  theirs.owner = 3;
+  b.submit(theirs, rest);
+
+  EventLog log;
+  NewOrder fok = limit(2, Side::Buy, 10'000, 10);
+  fok.owner = 7;
+  fok.tif = TimeInForce::FOK;
+  b.submit(fok, log);
+
+  CHECK(has_kind(log, Event::Kind::Trade));
+  CHECK(!has_reject(log, RejectReason::FokUnfillable));
+  CHECK_EQ(b.resting_count(), 0u);
+}

@@ -236,20 +236,28 @@ MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
 }
 
 template <class SideMap>
-Qty count_available(const SideMap& contra, Side aggressor_side, Price limit) {
+Qty count_available(const SideMap& contra, Side aggressor_side, Price limit,
+                    SelfTradePolicy stp, ParticipantId owner) {
+  // Size the aggressor owns is not fillable by the aggressor once self-trade
+  // prevention is on, so counting it toward a fill-or-kill decision passes
+  // orders that cannot fill.
+  const bool skip_own = stp != SelfTradePolicy::None && owner != kAnonymous;
   Qty total = 0;
   for (const auto& [px, level] : contra) {
     if (!crosses(aggressor_side, limit, px)) break;
-    for (const auto& ro : level) total += ro.open;
+    for (const auto& ro : level)
+      if (!skip_own || ro.owner != owner) total += ro.open;
   }
   return total;
 }
 
 }  // namespace
 
-Qty ReferenceBook::available_against(Side aggressor, Price limit) const {
-  return aggressor == Side::Buy ? count_available(asks_, aggressor, limit)
-                                : count_available(bids_, aggressor, limit);
+Qty ReferenceBook::available_against(Side aggressor, Price limit,
+                                     ParticipantId owner) const {
+  return aggressor == Side::Buy
+             ? count_available(asks_, aggressor, limit, stp_, owner)
+             : count_available(bids_, aggressor, limit, stp_, owner);
 }
 
 void ReferenceBook::rest(const RestingOrder& ro) {
@@ -302,7 +310,8 @@ void ReferenceBook::submit(const NewOrder& o, EventLog& out) {
                           ? (o.side == Side::Buy ? kMaxPrice : kMinPrice)
                           : o.price;
 
-  if (o.tif == TimeInForce::FOK && available_against(o.side, limit) < o.qty)
+  if (o.tif == TimeInForce::FOK &&
+      available_against(o.side, limit, o.owner) < o.qty)
     return reject(RejectReason::FokUnfillable);
 
   Event acc;

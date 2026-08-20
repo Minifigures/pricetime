@@ -131,7 +131,7 @@ export default function Home(): React.JSX.Element {
 {`git clone ${REPO}
 cd pricetime
 
-make test      # 93 tests, ~550,000 fuzzed operations
+make test      # 101 tests, ~600,000 fuzzed operations
 make bench     # latency percentiles, four flow regimes
 make recover   # journal a run, crash it, recover, prove it
 make replay    # the book, in your terminal`}
