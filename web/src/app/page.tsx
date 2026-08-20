@@ -23,6 +23,10 @@ const FACTS: ReadonlyArray<readonly [string, string]> = [
     "The feed says which orders were executed. The engine reconstructs what must have happened and checks whether it reaches the same conclusion. For Apple: 1,499 of 1,499.",
   ],
   [
+    "It consolidates three live exchanges into one best price.",
+    "Bitstamp, Coinbase and Kraken all quote BTC/USD at the same moment, so the engine rebuilds Bitstamp's book order by order and consolidates it against the other two into a real cross-venue best bid and offer. Building it surfaced two bugs, both caught by checking against the exchanges' own published tickers: a live order feed without an opening snapshot gives you a fraction of the real book, and a quote that is twenty seconds stale does not look stale, it looks like free money.",
+  ],
+  [
     "It survives being killed, and proves it.",
     "Every input is journalled before it is applied, and because the engine is deterministic those inputs are the state. The process was killed at every one of the 16,807 byte offsets in the journal; 16,406 of those cuts landed mid-record, and every one recovered to byte-identical state.",
   ],
@@ -188,7 +192,10 @@ cd pricetime
 make test     # 45 tests, including the differential fuzz
 make bench    # latency percentiles, four flow regimes
 make replay   # live order book in your terminal
-make recover  # journal a run, crash it, recover, prove it`}
+make recover  # journal a run, crash it, recover, prove it
+
+./scripts/feed_crypto.py | ./build/pricetime_nbbo
+              # live best price across three real exchanges`}
         </pre>
       </section>
 
