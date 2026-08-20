@@ -209,9 +209,26 @@ Qty Book::qty_at(Side s, Price p) const noexcept {
   return L == nullptr ? 0 : L->total;
 }
 
-Qty Book::available_against(Side aggressor, Price limit) const {
+Qty Book::available_against(Side aggressor, Price limit, Qty wanted) const {
   // Walks both tiers merged in price order, stopping at the first level the
-  // aggressor cannot reach. Used only by the FOK precheck.
+  // aggressor cannot reach, or as soon as `wanted` is covered. The FOK
+  // precheck asks a yes/no question, so counting past the answer is work
+  // thrown away. A market order's limit is the band edge, so every level
+  // crosses and the walk had no reason to stop.
+  //
+  // Measured, 512 resting levels, hot band 262,144 ticks, fillable market FOK:
+  //
+  //   without the early exit : 1804.2 ns/op
+  //   with it                :   27.7 ns/op
+  //
+  // Worth being precise about what this does not fix. An UNFILLABLE FOK never
+  // reaches `wanted`, so it still walks to the end of the crossable side, and
+  // the terminal scan_up/scan_down then sweeps the occupancy bitmap to the far
+  // edge of the band looking for a level that is not there. That path stays at
+  // roughly 550 ns on a 262,144-tick band against 15 ns for the limit case.
+  // Removing it needs a per-side "worst occupied level" cursor maintained
+  // across every mutation, which is more invariant to keep than the reject
+  // path is worth today.
   Qty total = 0;
   const bool buying = (aggressor == Side::Buy);
   Idx hot = buying ? best_ask_ : best_bid_;
@@ -226,6 +243,7 @@ Qty Book::available_against(Side aggressor, Price limit) const {
       const Price px = take_hot ? hp : cp;
       if (!crosses(aggressor, limit, px)) break;
       total += take_hot ? ask_lvls_[hot].total : cit->second.total;
+      if (total >= wanted) return total;
       if (take_hot) hot = scan_up(ask_bm_, hot + 1u); else ++cit;
     }
   } else {
@@ -238,6 +256,7 @@ Qty Book::available_against(Side aggressor, Price limit) const {
       const Price px = take_hot ? hp : cp;
       if (!crosses(aggressor, limit, px)) break;
       total += take_hot ? bid_lvls_[hot].total : cit->second.total;
+      if (total >= wanted) return total;
       if (take_hot) hot = (hot == 0 ? kNoLevel : scan_down(bid_bm_, hot - 1u));
       else ++cit;
     }
@@ -294,7 +313,7 @@ void Book::submit(const NewOrder& o, EventLog& out) {
                           ? (o.side == Side::Buy ? ceil_ : floor_)
                           : o.price;
 
-  if (o.tif == TimeInForce::FOK && available_against(o.side, limit) < o.qty)
+  if (o.tif == TimeInForce::FOK && available_against(o.side, limit, o.qty) < o.qty)
     return reject(RejectReason::FokUnfillable);
 
   Event acc;

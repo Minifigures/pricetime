@@ -163,7 +163,13 @@ class Book {
   void best_after_insert(Side s, Idx lvl) noexcept;
   void best_after_remove(Side s, Idx lvl) noexcept;
 
-  [[nodiscard]] Qty available_against(Side aggressor, Price limit) const;
+  // `wanted` lets the walk stop as soon as it has seen enough. The FOK
+  // precheck only ever asks "is there at least this much", so summing the
+  // whole crossable side is work thrown away, and for a market FOK every
+  // level crosses, which made the cost scale with the configured band rather
+  // than with book depth.
+  [[nodiscard]] Qty available_against(Side aggressor, Price limit,
+                                      Qty wanted) const;
   void rest_order(const NewOrder& o, Qty qty, Seq stamp, EventLog& out);
 
   Price floor_ = 0, ceil_ = 0;          // accepted price band (rejects outside)

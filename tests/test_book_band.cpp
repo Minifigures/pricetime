@@ -162,3 +162,35 @@ TEST(band_with_zero_and_negative_hot_ticks_still_matches) {
     CHECK_EQ(b.resting_count(), 0u);
   }
 }
+
+// The FOK precheck answers a yes/no question and must stop once it has seen
+// enough. Correctness first: the answer has to be unchanged by the early exit,
+// both when the book can fill the order and when it cannot.
+TEST(fok_precheck_answers_correctly_on_both_sides_of_the_boundary) {
+  Book b(kFloor, kCeil);
+  EventLog rest;
+  for (int i = 0; i < 8; ++i)
+    b.submit(limit(static_cast<OrderId>(100 + i), Side::Sell,
+                   10'000 + static_cast<Price>(i), 10), rest);
+  // 80 available in total.
+  EventLog ok;
+  NewOrder fill = limit(1, Side::Buy, 10'007, 80);
+  fill.tif = TimeInForce::FOK;
+  b.submit(fill, ok);
+  CHECK(has_kind(ok, Event::Kind::Trade));
+  CHECK(!has_reject(ok, RejectReason::FokUnfillable));
+  CHECK_EQ(b.resting_count(), 0u);
+
+  // One more than exists must be refused, not partially filled.
+  EventLog rest2;
+  for (int i = 0; i < 8; ++i)
+    b.submit(limit(static_cast<OrderId>(200 + i), Side::Sell,
+                   10'000 + static_cast<Price>(i), 10), rest2);
+  EventLog no;
+  NewOrder over = limit(2, Side::Buy, 10'007, 81);
+  over.tif = TimeInForce::FOK;
+  b.submit(over, no);
+  CHECK(has_reject(no, RejectReason::FokUnfillable));
+  CHECK(!has_kind(no, Event::Kind::Trade));
+  CHECK_EQ(b.resting_count(), 8u);
+}
