@@ -26,7 +26,7 @@ const mono = Azeret_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "pricetime — a matching engine, and its proof",
+  title: "pricetime, a matching engine, and its proof",
   description:
     "A limit order book and matching engine in C++20, compiled to WebAssembly. Two independent implementations, byte-identical output, running in your browser.",
 };

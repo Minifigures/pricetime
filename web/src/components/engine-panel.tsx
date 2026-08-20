@@ -36,7 +36,7 @@ const EMPTY: Snapshot = {
    the single most "this was built by someone who has looked at a real book"
    detail available for two lines of code. */
 function Price({ v, tone }: { v: number; tone: "bid" | "ask" }): React.JSX.Element {
-  if (!v) return <span className="text-instInk/25">—</span>;
+  if (!v) return <span className="text-instInk/25">&#183;</span>;
   const s = (v / 100).toFixed(2);
   const head = s.slice(0, -3);
   const tail = s.slice(-3);
