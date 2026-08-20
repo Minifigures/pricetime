@@ -60,7 +60,10 @@ std::vector<unsigned char> add_order(std::uint64_t id, std::int64_t px,
 // them apart is exactly what the regression test needs.
 std::vector<unsigned char> packet(const std::vector<std::vector<unsigned char>>& msgs,
                                   std::uint16_t count_field,
-                                  std::uint64_t stream_offset) {
+                                  std::uint64_t stream_offset,
+                                  unsigned char ip_proto = 17,
+                                  unsigned char ip_vhl = 0x45,
+                                  std::uint16_t frag = 0) {
   std::vector<unsigned char> block;
   for (const auto& m : msgs) {
     put16(block, static_cast<std::uint16_t>(m.size()));
@@ -83,8 +86,10 @@ std::vector<unsigned char> packet(const std::vector<std::vector<unsigned char>>&
   std::vector<unsigned char> frame(14, 0);
   frame[12] = 0x08; frame[13] = 0x00;                 // ethertype IPv4
   std::vector<unsigned char> ip(20, 0);
-  ip[0] = 0x45;                                       // version 4, IHL 5
-  ip[9] = 17;                                         // UDP
+  ip[0] = ip_vhl;                                     // version 4, IHL 5
+  ip[6] = static_cast<unsigned char>((frag >> 8) & 0x1F);
+  ip[7] = static_cast<unsigned char>(frag & 0xFF);
+  ip[9] = ip_proto;                                   // UDP
   frame.insert(frame.end(), ip.begin(), ip.end());
   std::vector<unsigned char> udp(8, 0);
   frame.insert(frame.end(), udp.begin(), udp.end());
@@ -284,5 +289,65 @@ TEST(iex_rejects_a_file_that_is_not_a_capture) {
   iex::DeepPlusReader rd;
   CHECK(!rd.open(path));
   CHECK(!rd.error().empty());
+  std::remove(path.c_str());
+}
+
+namespace {
+
+std::vector<unsigned char> one_message_capture(unsigned char proto,
+                                               unsigned char vhl,
+                                               std::uint16_t frag) {
+  std::vector<std::vector<unsigned char>> msgs{
+      add_order(1, 9900, 100, true, "AAPL")};
+  auto out = pcap_header();
+  const auto p = packet(msgs, 1, 0, proto, vhl, frag);
+  out.insert(out.end(), p.begin(), p.end());
+  return out;
+}
+
+}  // namespace
+
+// The frame used to be accepted on ethertype plus a 16-bit protocol-ID match
+// at a fixed offset, so any non-DEEP traffic in the capture could enter the
+// decoder on a one-in-65536 collision.
+TEST(iex_ignores_frames_that_are_not_udp) {
+  const auto path = tmp_path("tcp");
+  CHECK(write_gz(path, one_message_capture(6, 0x45, 0)));  // TCP
+  CHECK_EQ(decode_count(path), 0u);
+  std::remove(path.c_str());
+}
+
+// An IHL below five words would place the UDP header inside the IP header.
+TEST(iex_ignores_frames_with_an_impossible_header_length) {
+  const auto path = tmp_path("ihl");
+  CHECK(write_gz(path, one_message_capture(17, 0x40, 0)));  // IHL = 0
+  CHECK_EQ(decode_count(path), 0u);
+  std::remove(path.c_str());
+}
+
+// Only the first fragment carries a UDP header; later ones are payload.
+TEST(iex_ignores_later_ip_fragments) {
+  const auto path = tmp_path("frag");
+  CHECK(write_gz(path, one_message_capture(17, 0x45, 3)));
+  CHECK_EQ(decode_count(path), 0u);
+  std::remove(path.c_str());
+}
+
+// The symbol is raw bytes from the file and it gets printed to a terminal.
+TEST(iex_strips_control_bytes_from_the_symbol) {
+  const auto path = tmp_path("ansi");
+  std::vector<std::vector<unsigned char>> msgs{
+      add_order(1, 9900, 100, true, "\x1b[31mX")};
+  auto bytes = pcap_header();
+  const auto p = packet(msgs, 1, 0);
+  bytes.insert(bytes.end(), p.begin(), p.end());
+  CHECK(write_gz(path, bytes));
+
+  iex::DeepPlusReader rd;
+  CHECK(rd.open(path));
+  iex::Decoded d;
+  CHECK(rd.next(d));
+  const std::string sym = d.symbol.str();
+  CHECK(sym.find('\x1b') == std::string::npos);
   std::remove(path.c_str());
 }

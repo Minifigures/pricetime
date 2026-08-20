@@ -1,6 +1,7 @@
 #include "pricetime/iex.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <vector>
 
@@ -20,6 +21,25 @@ namespace {
 [[nodiscard]] inline bool plausible_price(std::int64_t v) noexcept {
   return v >= kMinPrice && v <= kMaxPrice;
 }
+
+// The symbol is eight raw bytes from the file and it gets printed. A capture
+// carrying ESC there would inject terminal escapes into whoever runs the
+// replay, so anything outside printable ASCII becomes '?' at decode time
+// rather than at every display site.
+inline void copy_symbol(char (&dst)[9], const char* src) noexcept {
+  for (int i = 0; i < 8; ++i) {
+    const auto c = static_cast<unsigned char>(src[i]);
+    dst[i] = (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '?';
+  }
+  dst[8] = '\0';
+}
+
+// le() returns raw bytes in host order, which is only the little-endian value
+// the protocol specifies if the host is itself little-endian. That was a
+// comment; on a big-endian host it would have been a silent wrong answer
+// rather than a build failure.
+static_assert(std::endian::native == std::endian::little,
+              "IEX-TP is little-endian and le() reads in host order");
 
 template <class T>
 [[nodiscard]] T le(const char* p) noexcept {
@@ -171,7 +191,10 @@ bool DeepPlusReader::next_frame_pcapng(std::vector<char>& frame) {
       return false;
     }
 
-    std::vector<char> body(total - 8);
+    // resize() only grows in practice, and never shrinks the capacity, so
+    // after the first few packets this stops touching the allocator.
+    auto& body = body_scratch_;
+    body.resize(total - 8);
     if (!read_exact(pipe_, body.data(), body.size())) {
       truncated_ = true;
       error_ = "capture ends mid-block";
@@ -190,7 +213,7 @@ bool DeepPlusReader::next_frame_pcapng(std::vector<char>& frame) {
 }
 
 bool DeepPlusReader::fill_packet() {
-  std::vector<char> frame;
+  auto& frame = frame_scratch_;
   for (;;) {
     const bool ok = (container_ == Container::Pcap) ? next_frame_pcap(frame)
                                                     : next_frame_pcapng(frame);
@@ -201,8 +224,18 @@ bool DeepPlusReader::fill_packet() {
     if (incl < kEthHeader + 20 + kUdpHeader + kIexTpHeader) continue;
     if (be16(frame.data() + 12) != 0x0800) continue;  // not IPv4
 
+    // A minimum IHL of 5 words is required by IPv4 itself; a smaller value
+    // would put the UDP header inside the IP header. Protocol 17 is UDP, and
+    // a non-zero fragment offset means this is not the first fragment and has
+    // no UDP header to read.
     const auto ihl = static_cast<std::size_t>(
         (static_cast<unsigned char>(frame[kEthHeader]) & 0x0F) * 4);
+    if (ihl < 20) continue;
+    if (kEthHeader + ihl > incl) continue;
+    if (static_cast<unsigned char>(frame[kEthHeader + 9]) != 17) continue;  // UDP
+    const auto frag = static_cast<std::uint16_t>(
+        be16(frame.data() + kEthHeader + 6) & 0x1FFF);
+    if (frag != 0) continue;                                   // not the first
     const std::size_t udp_body = kEthHeader + ihl + kUdpHeader;
     if (udp_body + kIexTpHeader > incl) continue;
 
@@ -262,7 +295,7 @@ bool DeepPlusReader::next(Decoded& out) {
         out.type     = MsgType::AddOrder;
         out.side     = (m[1] == '8') ? Side::Buy : Side::Sell;
         out.ts       = le<std::int64_t>(m + 2);
-        std::memcpy(out.symbol.c, m + 10, 8);
+        copy_symbol(out.symbol.c, m + 10);
         out.symbol.c[8] = '\0';
         out.order_id = le<std::uint64_t>(m + 18);
         out.size     = static_cast<Qty>(le<std::uint32_t>(m + 26));
@@ -280,7 +313,7 @@ bool DeepPlusReader::next(Decoded& out) {
         // honours the flag instead of re-deriving the rule from the diff.
         out.maintain_priority = (static_cast<unsigned char>(m[1]) & 0x01u) != 0;
         out.ts   = le<std::int64_t>(m + 2);
-        std::memcpy(out.symbol.c, m + 10, 8);
+        copy_symbol(out.symbol.c, m + 10);
         out.symbol.c[8] = '\0';
         out.order_id = le<std::uint64_t>(m + 18);
         out.size     = static_cast<Qty>(le<std::uint32_t>(m + 26));
@@ -293,7 +326,7 @@ bool DeepPlusReader::next(Decoded& out) {
         if (len < 26) { ++malformed_; continue; }
         out.type = MsgType::OrderDelete;
         out.ts   = le<std::int64_t>(m + 2);
-        std::memcpy(out.symbol.c, m + 10, 8);
+        copy_symbol(out.symbol.c, m + 10);
         out.symbol.c[8] = '\0';
         out.order_id = le<std::uint64_t>(m + 18);
         out.size  = 0;
@@ -305,7 +338,7 @@ bool DeepPlusReader::next(Decoded& out) {
         if (len < 38) { ++malformed_; continue; }
         out.type = MsgType::OrderExecuted;
         out.ts   = le<std::int64_t>(m + 2);
-        std::memcpy(out.symbol.c, m + 10, 8);
+        copy_symbol(out.symbol.c, m + 10);
         out.symbol.c[8] = '\0';
         out.order_id = le<std::uint64_t>(m + 18);
         out.size     = static_cast<Qty>(le<std::uint32_t>(m + 26));

@@ -124,6 +124,12 @@ class DeepPlusReader {
   std::string error_;
   bool        truncated_ = false;
   bool        at_record_boundary_ = true;
+  // Scratch buffers reused across packets. These were locals, so every block
+  // in the capture paid a malloc, a value-initialising memset that fread
+  // immediately overwrote, and a free. Across a full trading day that is tens
+  // of millions of allocations on the decode path.
+  std::vector<char> frame_scratch_;
+  std::vector<char> body_scratch_;
 
   std::string pkt_;        // current packet payload (UDP body)
   std::size_t pkt_pos_ = 0;
