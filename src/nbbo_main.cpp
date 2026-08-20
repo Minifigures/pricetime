@@ -63,10 +63,25 @@ std::string sz(Qty q) {
 }
 
 struct VenueInfo {
-  std::string name;
-  bool        book_backed = false;
+  std::string   name;
+  bool          book_backed = false;
   std::uint64_t msgs = 0;
+  std::int64_t  last_ms = 0;      // wall clock of this venue's last quote
+  bool          stale = false;
 };
+
+// A quote older than this, measured against the newest timestamp seen on ANY
+// venue, is excluded from the consolidated quote.
+//
+// This is not defensive coding, it is the difference between a real finding
+// and a fabricated one. An early run of this had Kraken on a channel that
+// published 8 times in 30 seconds, leaving its quote 20 seconds old and $18
+// away from the others. The consolidator dutifully reported thousands of
+// crossed markets and 135 trade-throughs. None were real: it was measuring
+// the age of my own data. A stale quote does not look stale in an NBBO, it
+// looks like free money, which is exactly why real consolidated feeds carry
+// per-participant timestamps and age quotes out.
+constexpr std::int64_t kStaleAfterMs = 2000;
 
 }  // namespace
 
@@ -82,6 +97,8 @@ int main(int argc, char** argv) {
   constexpr Price kFloor = 1, kCeil = 100'000'000;
 
   std::uint64_t lines = 0, trades = 0, tt_count = 0, locked = 0, crossed = 0;
+  std::uint64_t suppressed_stale = 0;
+  std::int64_t  newest_ms = 0;
   Price worst_harm = 0;
   std::vector<std::string> tape;
 
@@ -97,9 +114,11 @@ int main(int argc, char** argv) {
       const Bbo q = cons.get_exchange_bbo(v, kSym);
       const bool best_bid = (n.bid_venue == v && q.has_bid());
       const bool best_ask = (n.ask_venue == v && q.has_ask());
+      const char* tag = venues[v].stale ? "STALE"
+                        : (venues[v].book_backed ? "book" : "quote");
       std::printf("  %-12s %s%-6s%s %s%14s%s %12s   %s%14s%s %12s\n",
                   venues[v].name.c_str(),
-                  kDim, venues[v].book_backed ? "book" : "quote", kReset,
+                  venues[v].stale ? kYell : kDim, tag, kReset,
                   best_bid ? kGreen : "", px(q.bid_px).c_str(), best_bid ? kReset : "",
                   q.has_bid() ? sz(q.bid_sz).c_str() : "",
                   best_ask ? kRed : "", px(q.ask_px).c_str(), best_ask ? kReset : "",
@@ -119,15 +138,35 @@ int main(int argc, char** argv) {
                   kCyan, venues[n.ask_venue].name.c_str(), kReset,
                   col, state, kReset);
     }
-    std::printf("\n  messages %llu   trades %llu   locked %llu   crossed %llu   "
-                "trade-throughs %llu",
+    std::printf("\n  messages %llu   trades %llu   inverted %llu   locked %llu   "
+                "flagged %llu",
                 static_cast<unsigned long long>(lines),
                 static_cast<unsigned long long>(trades),
-                static_cast<unsigned long long>(locked),
                 static_cast<unsigned long long>(crossed),
+                static_cast<unsigned long long>(locked),
                 static_cast<unsigned long long>(tt_count));
     if (tt_count > 0)
       std::printf("   worst %s ticks", std::to_string(worst_harm).c_str());
+    if (suppressed_stale > 0)
+      std::printf("\n  %s%llu quote(s) withdrawn as stale (older than %lldms)%s",
+                  kDim, static_cast<unsigned long long>(suppressed_stale),
+                  static_cast<long long>(kStaleAfterMs), kReset);
+    // Say plainly what these counters are and are not. Crypto venues are not
+    // linked by anything resembling Reg NMS: there is no trade-through rule,
+    // no consolidated tape, and arbitrage is bounded by transfer latency and
+    // pre-positioned capital. So an inverted consolidated quote here is
+    // ordinary, not a violation and not free money.
+    //
+    // More importantly the counters are dominated by update-rate asymmetry.
+    // In a representative 35s capture Bitstamp sent 14,893 messages and
+    // Coinbase 370, so any instantaneous comparison mostly reflects which
+    // venue published most recently. These numbers are reported because
+    // suppressing them would be worse, not because they are a finding.
+    std::printf("\n\n  %sinverted and flagged counts are NOT a finding. Crypto venues have\n"
+                "  no trade-through rule and no shared clock, and these venues publish\n"
+                "  at very different rates, so the counters largely measure update-rate\n"
+                "  asymmetry rather than dislocation. The NBBO itself is real.%s\n",
+                kDim, kReset);
     std::printf("\n\n  %sTAPE%s\n", kDim, kReset);
     for (const auto& t : tape) std::printf("   %s\n", t.c_str());
     std::fflush(stdout);
@@ -170,6 +209,10 @@ int main(int argc, char** argv) {
     switch (kind) {
       case 'Q': {
         if (f.size() < 6) break;
+        if (f.size() >= 7) {
+          venues[v].last_ms = static_cast<std::int64_t>(num(6));
+          newest_ms = std::max(newest_ms, venues[v].last_ms);
+        }
         Bbo q;
         q.bid_px = num(2) ? static_cast<Price>(num(2)) : kInvalidPrice;
         q.bid_sz = static_cast<Qty>(num(3));
@@ -208,7 +251,7 @@ int main(int argc, char** argv) {
           worst_harm = std::max(worst_harm, tt.harm);
           char b[192];
           std::snprintf(b, sizeof(b),
-                        "%sTRADE-THROUGH%s %s printed %s, %s showed %s (%lld ticks)",
+                        "%sFLAGGED%s %s printed %s while %s showed %s (%lld ticks)",
                         kRed, kReset, venues[v].name.c_str(), px(tpx).c_str(),
                         venues[tt.better_venue].name.c_str(),
                         px(tt.best_elsewhere).c_str(),
@@ -227,6 +270,16 @@ int main(int argc, char** argv) {
         break;
       }
       default: break;
+    }
+
+    // Age quotes out before consolidating. A venue whose last quote predates
+    // the newest by more than the threshold is withdrawn rather than trusted.
+    for (VenueId x = 0; x < static_cast<VenueId>(venues.size()); ++x) {
+      if (venues[x].book_backed || venues[x].last_ms == 0) continue;
+      const bool was = venues[x].stale;
+      venues[x].stale = (newest_ms - venues[x].last_ms) > kStaleAfterMs;
+      if (venues[x].stale && !was) ++suppressed_stale;
+      if (venues[x].stale) cons.publish_quote(x, kSym, Bbo{});
     }
 
     const Nbbo n = cons.get_nbbo(kSym);
