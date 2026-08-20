@@ -104,6 +104,14 @@ class Consolidator {
   Book& book(VenueId v, SymbolId s, Price floor_px, Price ceil_px);
   [[nodiscard]] const Book* find_book(VenueId v, SymbolId s) const;
 
+  // Some venues publish order-by-order data and get a real Book; others
+  // publish only a top-of-book quote. Both are legitimate NBBO inputs and the
+  // consolidator accepts either, but it never pretends a quote-only venue has
+  // depth it did not send. quoted() reports which kind a venue is, so a
+  // consumer can say so rather than implying every venue was reconstructed.
+  void publish_quote(VenueId v, SymbolId s, const Bbo& q);
+  [[nodiscard]] bool is_quote_only(VenueId v, SymbolId s) const;
+
   [[nodiscard]] Bbo  get_exchange_bbo(VenueId v, SymbolId s) const;
   [[nodiscard]] Nbbo get_nbbo(SymbolId s) const;
 
@@ -136,6 +144,7 @@ class Consolidator {
 
   std::vector<std::string> venues_;
   std::unordered_map<Key, std::unique_ptr<Book>, KeyHash> books_;
+  std::unordered_map<Key, Bbo, KeyHash> quotes_;
 };
 
 }  // namespace pricetime

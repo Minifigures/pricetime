@@ -30,10 +30,21 @@ const Book* Consolidator::find_book(VenueId v, SymbolId s) const {
   return it == books_.end() ? nullptr : it->second.get();
 }
 
+void Consolidator::publish_quote(VenueId v, SymbolId s, const Bbo& q) {
+  quotes_[Key{v, s}] = q;
+}
+
+bool Consolidator::is_quote_only(VenueId v, SymbolId s) const {
+  return find_book(v, s) == nullptr && quotes_.count(Key{v, s}) != 0;
+}
+
 Bbo Consolidator::get_exchange_bbo(VenueId v, SymbolId s) const {
   Bbo out;
   const Book* b = find_book(v, s);
-  if (b == nullptr) return out;
+  if (b == nullptr) {
+    const auto q = quotes_.find(Key{v, s});
+    return q == quotes_.end() ? out : q->second;
+  }
   out.bid_px = b->best_bid();
   out.ask_px = b->best_ask();
   out.bid_sz = b->bid_size();
@@ -49,32 +60,32 @@ Nbbo Consolidator::get_nbbo(SymbolId s) const {
   // needed to scale, the answer is a per-symbol packed array of BBOs updated
   // on write, not a cleverer search here.
   for (VenueId v = 0; v < static_cast<VenueId>(venues_.size()); ++v) {
-    const Book* b = find_book(v, s);
-    if (b == nullptr) continue;
+    const Bbo side = get_exchange_bbo(v, s);
+    if (!side.has_bid() && !side.has_ask()) continue;
 
-    const Price bid = b->best_bid();
+    const Price bid = side.bid_px;
     if (bid != kInvalidPrice) {
       // Strictly greater: on a tie the earlier venue keeps the attribution.
       // Arbitrary but deterministic, which is what matters for replay.
       if (!n.quote.has_bid() || bid > n.quote.bid_px) {
         n.quote.bid_px = bid;
-        n.quote.bid_sz = b->bid_size();
+        n.quote.bid_sz = side.bid_sz;
         n.bid_venue    = v;
       } else if (bid == n.quote.bid_px) {
         // Size at the NBBO is the aggregate across every venue showing it.
         // This matters: a taker sweeping the touch can lift all of it.
-        n.quote.bid_sz += b->bid_size();
+        n.quote.bid_sz += side.bid_sz;
       }
     }
 
-    const Price ask = b->best_ask();
+    const Price ask = side.ask_px;
     if (ask != kInvalidPrice) {
       if (!n.quote.has_ask() || ask < n.quote.ask_px) {
         n.quote.ask_px = ask;
-        n.quote.ask_sz = b->ask_size();
+        n.quote.ask_sz = side.ask_sz;
         n.ask_venue    = v;
       } else if (ask == n.quote.ask_px) {
-        n.quote.ask_sz += b->ask_size();
+        n.quote.ask_sz += side.ask_sz;
       }
     }
   }
@@ -92,9 +103,8 @@ bool Consolidator::check_trade_through(SymbolId s, VenueId printed_on,
 
   for (VenueId v = 0; v < static_cast<VenueId>(venues_.size()); ++v) {
     if (v == printed_on) continue;
-    const Book* b = find_book(v, s);
-    if (b == nullptr) continue;
-    const Price px = (aggressor == Side::Buy) ? b->best_ask() : b->best_bid();
+    const Bbo q = get_exchange_bbo(v, s);
+    const Price px = (aggressor == Side::Buy) ? q.ask_px : q.bid_px;
     if (px == kInvalidPrice) continue;
     const bool better_than_print =
         (aggressor == Side::Buy) ? px < print_px : px > print_px;
@@ -121,7 +131,8 @@ bool Consolidator::check_trade_through(SymbolId s, VenueId printed_on,
 
 std::vector<SymbolId> Consolidator::symbols() const {
   std::set<SymbolId> uniq;
-  for (const auto& [k, b] : books_) uniq.insert(k.s);
+  for (const auto& [k, b] : books_)  uniq.insert(k.s);
+  for (const auto& [k, q] : quotes_) uniq.insert(k.s);
   return std::vector<SymbolId>(uniq.begin(), uniq.end());
 }
 
