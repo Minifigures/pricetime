@@ -105,7 +105,18 @@ export function EnginePanel(): React.JSX.Element {
     return () => window.clearInterval(id);
   }, [ready, running, onscreen, tick]);
 
-  const scale = Math.max(1, ...snap.bids.map((l) => l[1]), ...snap.asks.map((l) => l[1]));
+  // Depth bars carry cumulative size, not size at the level, and both sides
+  // divide by the same deepest visible total. Cumulative depth is monotonic,
+  // so the divisor only moves when total visible depth moves. Scaling to the
+  // largest single level instead makes every bar jump whenever one level
+  // trades, which reads as noise rather than as depth.
+  const cum = (ls: readonly Level[]): number[] => {
+    let run = 0;
+    return ls.map((l) => (run += l[1]));
+  };
+  const bidCum = cum(snap.bids);
+  const askCum = cum(snap.asks);
+  const scale = Math.max(1, bidCum[bidCum.length - 1] ?? 0, askCum[askCum.length - 1] ?? 0);
   const rows = Array.from({ length: 8 }, (_, i) => i);
   const spread = snap.bid > 0 && snap.ask > 0 ? snap.ask - snap.bid : null;
 
@@ -157,7 +168,7 @@ export function EnginePanel(): React.JSX.Element {
       {/* The book. Depth reads outward from the spread, which is where a
           trader's eye actually sits, rather than top-down like a table. */}
       <div className="grid grid-cols-1 sm:grid-cols-2">
-        <div className="border-b border-instRule px-6 py-5 sm:border-b-0 sm:border-r sm:px-8">
+        <div className="order-2 px-6 py-5 sm:order-1 sm:border-r sm:border-instRule sm:px-8">
           <div className="clause !text-instInk/35 mb-3 text-right">bids</div>
           {rows.map((i) => {
             const l = snap.bids[i];
@@ -168,8 +179,8 @@ export function EnginePanel(): React.JSX.Element {
                     <div
                       className="absolute right-0 top-0 h-full transition-[width] duration-150 ease-out"
                       style={{
-                        width: `${Math.max(3, (l[1] / scale) * 100)}%`,
-                        background: "rgba(69,196,137,0.20)",
+                        width: `${Math.max(2, ((bidCum[i] ?? 0) / scale) * 100)}%`,
+                        background: "rgba(69,196,137,0.16)",
                         borderRight: "1px solid rgba(69,196,137,0.55)",
                       }}
                     />
@@ -181,8 +192,9 @@ export function EnginePanel(): React.JSX.Element {
             );
           })}
         </div>
-        <div className="px-6 py-5 sm:px-8">
+        <div className="order-1 border-b border-instRule px-6 py-5 sm:order-2 sm:border-b-0 sm:px-8">
           <div className="clause !text-instInk/35 mb-3">asks</div>
+          <div className="flex flex-col-reverse sm:flex-col">
           {rows.map((i) => {
             const l = snap.asks[i];
             return (
@@ -194,8 +206,8 @@ export function EnginePanel(): React.JSX.Element {
                     <div
                       className="absolute left-0 top-0 h-full transition-[width] duration-150 ease-out"
                       style={{
-                        width: `${Math.max(3, (l[1] / scale) * 100)}%`,
-                        background: "rgba(255,111,97,0.20)",
+                        width: `${Math.max(2, ((askCum[i] ?? 0) / scale) * 100)}%`,
+                        background: "rgba(255,111,97,0.16)",
                         borderLeft: "1px solid rgba(255,111,97,0.55)",
                       }}
                     />
@@ -204,12 +216,13 @@ export function EnginePanel(): React.JSX.Element {
               </div>
             );
           })}
+          </div>
         </div>
       </div>
 
       <div className="grid grid-cols-2 border-t border-instRule sm:grid-cols-4">
         {([
-          ["spread", spread === null ? "—" : `${spread} ticks`],
+          ["spread", spread === null ? "n/a" : `${spread} ticks`],
           ["messages", snap.msgs.toLocaleString()],
           ["trades", snap.trades.toLocaleString()],
           ["resting", snap.resting.toLocaleString()],
