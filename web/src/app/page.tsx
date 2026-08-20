@@ -6,7 +6,11 @@ const HEADLINE: ReadonlyArray<readonly [string, string, string]> = [
   ["50,163,616", "real orders replayed", "one full trading day from a live US exchange"],
   ["100.0%", "agreement with the venue", "1,499 of 1,499 executions matched exactly"],
   ["40x", "faster after one fix", "1,986 ns to 50 ns per order"],
+  ["50 ns", "per order, real data", "12.8 million orders per second"],
   ["16,807", "crash points verified", "killed at every byte, all recovered exactly"],
+  ["3", "live exchanges", "consolidated into one best price, in real time"],
+  ["62", "automated tests", "~400,000 fuzzed operations"],
+  ["0", "dependencies", "g++ and make, nothing else"],
 ];
 
 const FACTS: ReadonlyArray<readonly [string, string]> = [
@@ -24,7 +28,11 @@ const FACTS: ReadonlyArray<readonly [string, string]> = [
   ],
   [
     "It consolidates three live exchanges into one best price.",
-    "Bitstamp, Coinbase and Kraken all quote BTC/USD at the same moment, so the engine rebuilds Bitstamp's book order by order and consolidates it against the other two into a real cross-venue best bid and offer. Building it surfaced two bugs, both caught by checking against the exchanges' own published tickers: a live order feed without an opening snapshot gives you a fraction of the real book, and a quote that is twenty seconds stale does not look stale, it looks like free money.",
+    "Bitstamp, Coinbase and Kraken all quote BTC/USD at the same moment, so the engine rebuilds Bitstamp's book order by order and consolidates it against the other two into a real cross-venue best bid and offer. Building it surfaced three bugs, every one caught by checking against the exchanges' own published prices rather than trusting my own output.",
+  ],
+  [
+    "Price-time priority is a choice, and it is not the only one.",
+    "Which order fills first, once several sit at the same price, is a separate decision from price priority. CME runs ten different answers and exposes the choice per instrument. This implements three: FIFO, pro-rata, and CME's configurable split between them, which runs in production at 40 percent FIFO on grain and oilseed contracts. Under pro-rata a large order that arrived a moment ago outranks a small one that has rested all day, and that single change is why pro-rata markets show cancellation rates above 96 percent.",
   ],
   [
     "It survives being killed, and proves it.",
@@ -156,6 +164,36 @@ export default function Home(): React.JSX.Element {
           That last line is the honest part. Inputs after the cut are genuinely
           gone, and an operator is told exactly how far the world rewound
           rather than that everything is fine.
+        </p>
+      </section>
+
+      <section className="mb-16 rounded-lg border border-line bg-panel p-6">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-300">
+          A market with no order-protection rule stays inverted
+        </h2>
+        <p className="max-w-2xl text-sm leading-relaxed text-neutral-400">
+          Consolidating three live exchanges produced a book that is inverted
+          essentially all the time. That turns out to be the{" "}
+          <span className="text-neutral-100">correct</span> answer, not a bug.
+          Checked against each venue&apos;s own API rather than my output:
+        </p>
+        <pre className="mt-3 overflow-x-auto rounded border border-line bg-ink p-4 font-mono text-xs leading-relaxed text-neutral-400">
+{`bitstamp  bid 69449.38  ask 69449.39   own spread $0.01
+coinbase  bid 69452.18  ask 69452.19   own spread $0.01
+kraken    bid 69458.90  ask 69459.00   own spread $0.10`}
+        </pre>
+        <p className="mt-3 max-w-2xl text-sm leading-relaxed text-neutral-400">
+          Every venue quotes a penny-wide market internally, yet they sit{" "}
+          <span className="text-neutral-100">$3 to $10 apart</span>. Nothing
+          closes the gap: taker fees of 0.26 to 0.6 percent are $180 to $400 on
+          a $69,000 trade, so the dislocation is one to two orders of magnitude
+          too small to arbitrage. And crypto has no rule forcing venues into
+          line, which is the natural experiment US stock markets cannot run.
+        </p>
+        <p className="mt-3 max-w-2xl text-xs leading-relaxed text-neutral-600">
+          The engine therefore has to accept a crossed consolidated book as
+          valid. An implementation that assumes the best bid is always below
+          the best ask fails within seconds of real data.
         </p>
       </section>
 
