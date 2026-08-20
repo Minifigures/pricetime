@@ -35,12 +35,12 @@ export default function Home(): React.JSX.Element {
         </div>
       </header>
 
-      <section className="mx-auto max-w-5xl px-6 pb-14 pt-16 sm:px-10 sm:pt-24">
+      <section className="mx-auto max-w-5xl px-6 pb-10 pt-12 sm:px-10 sm:pt-16">
         <h1 className="max-w-4xl font-display text-[2.75rem] font-light leading-[1.04] tracking-[-0.02em] sm:text-[4.25rem]">
           Every trade in the world passes through a matching engine.
           <span className="block text-ink3">Almost every first one is quietly wrong.</span>
         </h1>
-        <p className="mt-8 max-w-2xl text-[1.0625rem] leading-relaxed text-ink2">
+        <p className="mt-7 max-w-2xl text-[1.0625rem] leading-relaxed text-ink2">
           It decides who trades with whom, at what price, in what order. Simple
           enough to describe in a sentence and unforgiving enough that the
           mistakes are measured in hundreds of millions of dollars. This one is
