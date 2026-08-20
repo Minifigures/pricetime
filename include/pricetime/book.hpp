@@ -70,7 +70,8 @@ class Book {
        SelfTradePolicy stp = SelfTradePolicy::None,
        std::size_t expected_orders = 1u << 16,
        Price hot_ticks = kDefaultHotTicks,
-       Allocation alloc = Allocation::Fifo);
+       Allocation alloc = Allocation::Fifo,
+       int fifo_percent = kDefaultFifoPercent);
 
   void submit(const NewOrder& o, EventLog& out);
   void cancel(const CancelOrder& c, EventLog& out);
@@ -184,6 +185,7 @@ class Book {
   std::unordered_map<OrderId, Idx> index_;
   SelfTradePolicy stp_      = SelfTradePolicy::None;
   Allocation      alloc_    = Allocation::Fifo;
+  int             fifo_pct_ = kDefaultFifoPercent;
   Seq             next_seq_ = 1;
   // Scratch reused across matches so the pro-rata pass allocates nothing on
   // the hot path. Cleared, never freed.

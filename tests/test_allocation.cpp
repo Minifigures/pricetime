@@ -112,6 +112,61 @@ TEST(prorata_never_overfills_a_resting_order) {
   CHECK_EQ(b.qty_at(Side::Buy, 10000), 98);  // remainder rests
 }
 
+TEST(split_allocates_the_configured_percentage_fifo_then_the_rest_prorata) {
+  // 40 percent FIFO, CME's own production setting on grain and oilseed.
+  // Aggressor 100 against three resting orders of 100 each.
+  //   FIFO step:     40 lots to the oldest
+  //   Pro-rata step: remaining 60 split over 60/100/100 -> 60*60/260 = 13,
+  //                  100*60/260 = 23, 100*60/260 = 23, total 59
+  //   FIFO remainder: the last lot to the oldest still resting
+  Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+         Book::kDefaultHotTicks, Allocation::Split, 40);
+  EventLog log;
+  b.submit(lim(1, Side::Sell, 10000, 100), log);
+  b.submit(lim(2, Side::Sell, 10000, 100), log);
+  b.submit(lim(3, Side::Sell, 10000, 100), log);
+  log.clear();
+  b.submit(lim(4, Side::Buy, 10000, 100), log);
+
+  Qty to1 = 0, to2 = 0, to3 = 0, total = 0;
+  for (const auto& [id, q] : fills(log)) {
+    total += q;
+    if (id == 1) to1 += q; else if (id == 2) to2 += q; else to3 += q;
+  }
+  CHECK_EQ(total, 100);
+  CHECK(to1 > to2);            // the FIFO step favours the oldest
+  CHECK(to2 > 0 && to3 > 0);   // but the others still participate
+  CHECK_EQ(to2, to3);          // equal size, equal proportional share
+}
+
+TEST(split_at_100_percent_is_exactly_fifo) {
+  auto run = [](Allocation a, int pct) {
+    Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+           Book::kDefaultHotTicks, a, pct);
+    EventLog log;
+    b.submit(lim(1, Side::Sell, 10000, 30), log);
+    b.submit(lim(2, Side::Sell, 10000, 30), log);
+    log.clear();
+    b.submit(lim(3, Side::Buy, 10000, 40), log);
+    return fills(log);
+  };
+  CHECK(run(Allocation::Split, 100) == run(Allocation::Fifo, 0));
+}
+
+TEST(split_at_0_percent_is_exactly_prorata) {
+  auto run = [](Allocation a, int pct) {
+    Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+           Book::kDefaultHotTicks, a, pct);
+    EventLog log;
+    b.submit(lim(1, Side::Sell, 10000, 30), log);
+    b.submit(lim(2, Side::Sell, 10000, 30), log);
+    log.clear();
+    b.submit(lim(3, Side::Buy, 10000, 40), log);
+    return fills(log);
+  };
+  CHECK(run(Allocation::Split, 0) == run(Allocation::ProRata, 0));
+}
+
 TEST(prorata_matches_the_reference_implementation) {
   // Same input, both engines, pro-rata. The full randomized version of this
   // lives in test_differential.cpp; this is the readable one.

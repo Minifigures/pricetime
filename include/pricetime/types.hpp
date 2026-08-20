@@ -106,11 +106,29 @@ enum class SelfTradePolicy : std::uint8_t {
 //            FIFO. Timestamps are not consulted in the proportional step.
 //            Pro-rata is never the last step precisely because of the
 //            rounding; something has to place the leftovers.
-enum class Allocation : std::uint8_t { Fifo = 0, ProRata = 1 };
+//   Split    CME's Configurable algorithm: a fixed percentage of each fill is
+//            allocated FIFO and the rest pro-rata. CME calls the parameter
+//            "Price Time Percentage", an integer where 100 is pure price-time
+//            and 0 is pure pro-rata, and runs it in production at 40 percent
+//            FIFO on grain and oilseed contracts. It exists because neither
+//            pure rule is satisfactory: pure FIFO lets one large resting order
+//            block everyone behind it, and pure pro-rata rewards submitting
+//            size you never intend to fill.
+enum class Allocation : std::uint8_t { Fifo = 0, ProRata = 1, Split = 2 };
 
 [[nodiscard]] constexpr const char* to_string(Allocation a) noexcept {
-  return a == Allocation::Fifo ? "FIFO" : "PRO-RATA";
+  switch (a) {
+    case Allocation::Fifo:    return "FIFO";
+    case Allocation::ProRata: return "PRO-RATA";
+    case Allocation::Split:   return "SPLIT";
+  }
+  return "?";
 }
+
+// Percentage of each fill allocated by the FIFO step under Allocation::Split.
+// 100 is equivalent to Fifo, 0 to ProRata. CME's own default on the contracts
+// that use it is 40.
+inline constexpr int kDefaultFifoPercent = 40;
 
 enum class RejectReason : std::uint8_t {
   None = 0,

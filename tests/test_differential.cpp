@@ -77,10 +77,11 @@ int combo_key(OrderType t, TimeInForce f, Side s) {
 std::size_t run_campaign(std::uint64_t seed, std::size_t ops,
                          SelfTradePolicy stp,
                          Price hot_ticks = Book::kDefaultHotTicks,
-                         Allocation alloc = Allocation::Fifo) {
+                         Allocation alloc = Allocation::Fifo,
+                         int fifo_pct = kDefaultFifoPercent) {
   Rng rng(seed);
-  ReferenceBook ref(stp, alloc);
-  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks, alloc);
+  ReferenceBook ref(stp, alloc, fifo_pct);
+  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks, alloc, fifo_pct);
 
   std::vector<OrderId> live;
   OrderId next_id = 1;
@@ -215,6 +216,15 @@ TEST(differential_prorata_with_self_trade_prevention) {
   for (std::uint64_t seed = 600; seed <= 610; ++seed)
     CHECK_EQ(run_campaign(seed, 4000, SelfTradePolicy::CancelResting,
                           Book::kDefaultHotTicks, Allocation::ProRata), 4000u);
+}
+
+// CME's Configurable algorithm across the whole parameter range, not just the
+// default. 0 and 100 must degenerate exactly to pro-rata and FIFO.
+TEST(differential_split_across_the_percentage_range) {
+  for (int pct : {0, 25, 40, 75, 100})
+    for (std::uint64_t seed = 700; seed <= 706; ++seed)
+      CHECK_EQ(run_campaign(seed, 3000, SelfTradePolicy::None,
+                            Book::kDefaultHotTicks, Allocation::Split, pct), 3000u);
 }
 
 TEST(all_combinations_exercised) {

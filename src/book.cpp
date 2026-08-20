@@ -5,8 +5,10 @@
 namespace pricetime {
 
 Book::Book(Price floor_px, Price ceil_px, SelfTradePolicy stp,
-           std::size_t expected_orders, Price hot_ticks, Allocation alloc)
-    : floor_(floor_px), ceil_(ceil_px), stp_(stp), alloc_(alloc) {
+           std::size_t expected_orders, Price hot_ticks, Allocation alloc,
+           int fifo_percent)
+    : floor_(floor_px), ceil_(ceil_px), stp_(stp), alloc_(alloc),
+      fifo_pct_(std::clamp(fifo_percent, 0, 100)) {
   // The hot ladder is centred on the accepted band and clamped to it. When the
   // accepted band is already small (the synthetic benchmarks, most tests) the
   // whole thing is hot and the cold tier never sees a level.
@@ -300,9 +302,33 @@ void Book::submit(const NewOrder& o, EventLog& out) {
     if (Lp == nullptr) break;
     Level& L = *Lp;
 
+    // Split: a fixed percentage placed FIFO before the proportional pass.
+    if (alloc_ == Allocation::Split && remaining > 0 && L.head != kNil) {
+      Qty fifo_part = (remaining * fifo_pct_) / 100;
+      Idx n = L.head;
+      while (n != kNil && fifo_part > 0 && remaining > 0) {
+        const Idx nxt = pool_[n].next;
+        const bool self_match = stp_ != SelfTradePolicy::None &&
+                                o.owner != kAnonymous && pool_[n].owner == o.owner;
+        if (self_match) { n = nxt; continue; }
+        const Qty q = std::min(fifo_part, pool_[n].open);
+        out.push_back(make_trade(o.id, pool_[n].id, o.side, px, q, next_seq_++));
+        pool_[n].open -= q; L.total -= q; remaining -= q; fifo_part -= q;
+        if (pool_[n].open == 0) {
+          index_.erase(pool_[n].id);
+          const Idx p2 = pool_[n].prev;
+          if (p2 != kNil) pool_[p2].next = nxt; else L.head = nxt;
+          if (nxt != kNil) pool_[nxt].prev = p2; else L.tail = p2;
+          free_node(n);
+        }
+        n = nxt;
+      }
+    }
+
     // Proportional pass. Mirrors ReferenceBook::prorata_shares exactly; the
     // differential fuzz across policies is what keeps them that way.
-    if (alloc_ == Allocation::ProRata && remaining > 0 && L.head != kNil) {
+    if ((alloc_ == Allocation::ProRata || alloc_ == Allocation::Split) &&
+        remaining > 0 && L.head != kNil) {
       pr_nodes_.clear();
       pr_share_.clear();
       Qty total = 0;

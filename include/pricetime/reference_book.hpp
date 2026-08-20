@@ -31,8 +31,10 @@ namespace pricetime {
 class ReferenceBook {
  public:
   explicit ReferenceBook(SelfTradePolicy stp = SelfTradePolicy::None,
-                         Allocation alloc = Allocation::Fifo) noexcept
-      : stp_(stp), alloc_(alloc) {}
+                         Allocation alloc = Allocation::Fifo,
+                         int fifo_percent = kDefaultFifoPercent) noexcept
+      : stp_(stp), alloc_(alloc),
+        fifo_pct_(fifo_percent < 0 ? 0 : (fifo_percent > 100 ? 100 : fifo_percent)) {}
 
   void submit(const NewOrder& o, EventLog& out);
   void cancel(const CancelOrder& c, EventLog& out);
@@ -94,6 +96,7 @@ class ReferenceBook {
   std::unordered_map<OrderId, std::pair<Side, Price>> live_;
   SelfTradePolicy stp_ = SelfTradePolicy::None;
   Allocation      alloc_ = Allocation::Fifo;
+  int             fifo_pct_ = kDefaultFifoPercent;
   Seq next_seq_ = 1;
 };
 

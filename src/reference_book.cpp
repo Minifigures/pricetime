@@ -60,7 +60,7 @@ MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
                      Qty want, OrderId aggr_id, ParticipantId aggr_owner,
                      SelfTradePolicy stp, Seq& next_seq, EventLog& out,
                      std::unordered_map<OrderId, std::pair<Side, Price>>& live,
-                     Side contra_side, Allocation alloc) {
+                     Side contra_side, Allocation alloc, int fifo_pct) {
   MatchResult res;
   Qty remaining = want;
 
@@ -71,10 +71,32 @@ MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
 
     auto& level = lvl_it->second;
 
-    // Pro-rata runs a proportional pass first, then falls through to the FIFO
-    // loop below to place the rounding remainder. Under FIFO this pass is
-    // skipped entirely and behaviour is unchanged.
-    if (alloc == Allocation::ProRata && remaining > 0 && !level.empty()) {
+    // Under Split, a fixed percentage of the fill is placed FIFO before the
+    // proportional pass runs on what is left. CME's step order is Split, then
+    // FIFO, then Pro-Rata, then a final FIFO for the rounding remainder.
+    if (alloc == Allocation::Split && remaining > 0 && !level.empty()) {
+      Qty fifo_part = (remaining * fifo_pct) / 100;
+      std::size_t k = 0;
+      while (k < level.size() && fifo_part > 0 && remaining > 0) {
+        RestingOrder& ro = level[k];
+        const bool self_match = stp != SelfTradePolicy::None &&
+                                aggr_owner != kAnonymous && ro.owner == aggr_owner;
+        if (self_match) { ++k; continue; }
+        const Qty q = std::min(fifo_part, ro.open);
+        out.push_back(make_trade(aggr_id, ro.id, aggressor_side, px, q, next_seq++));
+        ro.open -= q; remaining -= q; fifo_part -= q; res.filled += q;
+        if (ro.open == 0) {
+          live.erase(ro.id);
+          level.erase(level.begin() + static_cast<std::ptrdiff_t>(k));
+        } else { ++k; }
+      }
+    }
+
+    // Pro-rata runs a proportional pass, then falls through to the FIFO loop
+    // below to place the rounding remainder. Under plain FIFO this is skipped
+    // entirely and behaviour is unchanged.
+    if ((alloc == Allocation::ProRata || alloc == Allocation::Split) &&
+        remaining > 0 && !level.empty()) {
       std::vector<bool> eligible(level.size(), true);
       if (stp != SelfTradePolicy::None && aggr_owner != kAnonymous)
         for (std::size_t k = 0; k < level.size(); ++k)
@@ -231,9 +253,9 @@ void ReferenceBook::submit(const NewOrder& o, EventLog& out) {
   const MatchResult mr =
       (o.side == Side::Buy)
           ? do_match(asks_, o.side, limit, o.qty, o.id, o.owner, stp_,
-                     next_seq_, out, live_, Side::Sell, alloc_)
+                     next_seq_, out, live_, Side::Sell, alloc_, fifo_pct_)
           : do_match(bids_, o.side, limit, o.qty, o.id, o.owner, stp_,
-                     next_seq_, out, live_, Side::Buy, alloc_);
+                     next_seq_, out, live_, Side::Buy, alloc_, fifo_pct_);
 
   const Qty remainder = o.qty - mr.filled;
   if (remainder <= 0) return;

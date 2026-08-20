@@ -8,7 +8,7 @@ prices execute first; at the same price, whoever arrived first executes first.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 58 tests, including ~300k-op differential fuzz
+make test      # 62 tests, including ~400k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
@@ -231,9 +231,22 @@ percent** — because rationing by size makes traders submit orders far larger
 than they intend to fill. The allocation rule changes what participants *do*,
 not just who gets filled.
 
-Both policies run the full differential fuzz, because allocation is the most
-intricate part of matching and unit tests passing is not sufficient reason to
-trust it.
+**Split**: CME's Configurable algorithm. A fixed percentage of each fill is
+placed FIFO and the remainder pro-rata. CME calls the parameter *Price Time
+Percentage*, an integer where 100 is pure price-time and 0 is pure pro-rata, and
+runs it in production at **40 percent FIFO on grain and oilseed contracts**. It
+exists because neither pure rule is satisfactory: pure FIFO lets one large
+resting order block everyone behind it, and pure pro-rata rewards submitting
+size you never intend to fill.
+
+The parameterisation is verified rather than asserted: `split_at_100_percent_is_exactly_fifo`
+and `split_at_0_percent_is_exactly_prorata` require the degenerate cases to
+produce byte-identical fills to the standalone policies. If they diverge, these
+are three unrelated code paths wearing one name.
+
+All three run the full differential fuzz, including Split across the whole
+percentage range, because allocation is the most intricate part of matching and
+unit tests passing is not sufficient reason to trust it.
 
 ---
 
@@ -251,8 +264,9 @@ levels of depth per side).
 
 **Coverage: 100,000 randomized operations** across three self-trade policies and
 26 seeded campaigns, plus 23 hand-written behavioural tests, 11 consolidation
-tests, 5 sharding tests, 6 journal and recovery tests, and 5 allocation
-tests. The differential campaigns run under both FIFO and pro-rata. The NBBO is separately fuzzed across four venues against an independent
+tests, 5 sharding tests, 6 journal and recovery tests, and 8 allocation tests.
+The differential campaigns run under FIFO, pro-rata, and split across five
+FIFO percentages. The NBBO is separately fuzzed across four venues against an independent
 naive walk of every level of every venue.
 
 Two details borrowed from better engineers:
@@ -659,9 +673,9 @@ one.
 - **No ingress sequencing.** Sharded replay is batch: messages are partitioned
   up front. A live venue must establish total order at ingress, which is the
   single-writer bottleneck every exchange architecture is organised around.
-- **Two allocation models, not ten.** FIFO and pro-rata are implemented (see
-  below). CME alone runs ten, adding top-order priority, Lead Market Maker
-  allocations, configurable FIFO/pro-rata splits and leveling steps.
+- **Three allocation models, not ten.** FIFO, pro-rata and CME's configurable
+  split are implemented. Still missing: top-order priority, Lead Market Maker
+  allocations, threshold minimums, and the leveling step.
 - **The order index is `std::unordered_map`.** Measured and found *not* to be
   the bottleneck, so it stays documented rather than optimized.
 - **Benchmarked on WSL2**, no core pinning, no isolated cores, no huge pages.
@@ -695,6 +709,8 @@ sanitizers.
 - CFTC Release 8369-21 (Coinbase, self-matching)
 - Moallemi & Yuan, *A Model for Queue Position Valuation in a Limit Order Book*, Columbia GSB, rev. 2017
 - Thompson et al., *Disruptor*, LMAX, 2011; Fowler, *The LMAX Architecture*, 2011
+- Field & Large, *Pro-Rata Matching in One-Tick Markets*, CFS Working Paper 2008/40
+- Haynes & Onur, *Precedence rules in matching algorithms*, J. Commodity Markets 19, 2020
 - CME Group, *Supported Matching Algorithms*; MIAX Pearl Equities Rule 2614(f)
 - IEX DEEP+ Specification v1.04
 
