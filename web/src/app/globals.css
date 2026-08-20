@@ -2,5 +2,76 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
-body { background: #07090c; color: #e6edf3; }
+/* The page is a document. The engine is an instrument set into it.
+   Everything light is paper; the one dark object on the page is the machine
+   actually running. That inversion is the whole visual idea: a matching engine
+   is a piece of infrastructure that lives inside a body of rules, and the
+   rules are what you read while the machine runs beside them. */
+:root {
+  --paper:      #F0F1F3;   /* cool grey, deliberately not cream */
+  --paper-2:    #E7E9ED;
+  --ink:        #111317;
+  --ink-2:      #4A505A;
+  --ink-3:      #7C838F;
+  --rule:       #D2D6DD;
+  --rule-2:     #BFC5CE;
+
+  --instrument: #0A0D12;   /* the machine */
+  --inst-rule:  #1E242E;
+  --inst-ink:   #C8D0DA;
+
+  --bid:        #14663F;   /* on paper */
+  --ask:        #9C2A2A;
+  --bid-lit:    #45C489;   /* inside the instrument */
+  --ask-lit:    #FF6F61;
+  --signal:     #B26B00;   /* used once, for the proof counter */
+
+  color-scheme: light;
+}
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  font-synthesis-weight: none;
+  /* Engineering paper: a faint grid, not a texture image. */
+  background-image:
+    linear-gradient(to right, rgba(17,19,23,.028) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(17,19,23,.028) 1px, transparent 1px);
+  background-size: 88px 88px;
+}
+
+/* Numbers must line up. Every figure on this page is data. */
+.tnum { font-variant-numeric: tabular-nums slashed-zero; }
+
+/* Hairlines, never borders. A rule is a typographic object. */
+.rule-t { border-top: 1px solid var(--rule); }
+.rule-b { border-bottom: 1px solid var(--rule); }
+
+/* An eyebrow marks a section of a document, so it reads like a clause
+   reference rather than a decorative label. */
+.clause {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: .6875rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* The proof counter is the one place colour is allowed to shout. */
+@keyframes tick-in { from { opacity: .35 } to { opacity: 1 } }
+.tick { animation: tick-in 320ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tick { animation: none; }
+  * { transition-duration: .01ms !important; }
+}
+
+::selection { background: var(--ink); color: var(--paper); }
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}

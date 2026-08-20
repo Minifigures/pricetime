@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "pricetime/book.hpp"
+#include "pricetime/reference_book.hpp"
 
 using namespace pricetime;
 
@@ -45,7 +46,15 @@ class Rng {
 };
 
 struct Sim {
-  Book book{kFloor, kCeil};
+  // BOTH engines, driven by identical input. This is the project's thesis
+  // running in a browser rather than asserted in a README: the optimized book
+  // is not trusted because it looks correct, it is trusted because it produces
+  // byte-identical output to an implementation that is obviously correct.
+  Book          book{kFloor, kCeil};
+  ReferenceBook ref{};
+  std::uint64_t compared = 0;   // events checked event-for-event
+  std::uint64_t diverged = 0;   // must stay zero
+  std::string   last_line;      // most recent event, rendered
   Rng  rng{0xDEC0DE};
   std::vector<OrderId> live;
   OrderId next_id = 1;
@@ -66,6 +75,10 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE void pt_reset(int seed) {
   Sim& s = sim();
   s.book = Book(kFloor, kCeil);
+  s.ref  = ReferenceBook();
+  s.compared = 0;
+  s.diverged = 0;
+  s.last_line.clear();
   s.rng = Rng(static_cast<std::uint64_t>(seed));
   s.live.clear(); s.next_id = 1; s.drift = kMid;
   s.msgs = s.trades = s.rejects = 0; s.vol = 0; s.tape.clear();
@@ -74,16 +87,20 @@ EMSCRIPTEN_KEEPALIVE void pt_reset(int seed) {
 // Applies `n` messages and returns nothing; call pt_snapshot() to read state.
 EMSCRIPTEN_KEEPALIVE void pt_step(int n) {
   Sim& s = sim();
-  EventLog log;
+  EventLog log, rlog;
   log.reserve(64);
+  rlog.reserve(64);
   const double t0 = emscripten_get_now();
   for (int k = 0; k < n; ++k) {
     log.clear();
+    rlog.clear();
     s.drift = std::clamp<Price>(s.drift + s.rng.in(-1, 1), kFloor + 50, kCeil - 50);
     if (!s.live.empty() && s.rng.in(1, 100) <= 40) {
       const auto i = static_cast<std::size_t>(
           s.rng.in(0, static_cast<std::int64_t>(s.live.size()) - 1));
-      s.book.cancel(CancelOrder{s.live[i], 0}, log);
+      const CancelOrder cx{s.live[i], 0};
+      s.book.cancel(cx, log);
+      s.ref.cancel(cx, rlog);
       s.live[i] = s.live.back();
       s.live.pop_back();
     } else {
@@ -99,9 +116,24 @@ EMSCRIPTEN_KEEPALIVE void pt_step(int n) {
       o.price = std::clamp<Price>(o.price, kFloor, kCeil);
       o.qty = s.rng.in(1, 60);
       s.book.submit(o, log);
+      s.ref.submit(o, rlog);
       if (!agg) s.live.push_back(o.id);
     }
     ++s.msgs;
+
+    // Compare the two streams event for event, exactly as the differential
+    // test does natively. A mismatch here would mean the engine in this
+    // browser tab disagrees with its own specification.
+    if (log.size() != rlog.size()) {
+      ++s.diverged;
+    } else {
+      for (std::size_t i = 0; i < log.size(); ++i) {
+        ++s.compared;
+        if (!(log[i] == rlog[i])) ++s.diverged;
+      }
+    }
+    if (!log.empty()) s.last_line = to_line(log.back());
+
     for (const Event& e : log) {
       if (e.kind == Event::Kind::Trade) {
         ++s.trades; s.vol += e.qty;
@@ -153,12 +185,18 @@ EMSCRIPTEN_KEEPALIVE const char* pt_snapshot() {
                 static_cast<long long>(ba == kInvalidPrice ? 0 : ba));
   j += buf;
   std::snprintf(buf, sizeof(buf),
-                "\"msgs\":%llu,\"trades\":%llu,\"vol\":%lld,\"resting\":%zu,\"ns\":%.0f}",
+                "\"msgs\":%llu,\"trades\":%llu,\"vol\":%lld,\"resting\":%zu,"
+                "\"ns\":%.0f,\"compared\":%llu,\"diverged\":%llu,",
                 static_cast<unsigned long long>(s.msgs),
                 static_cast<unsigned long long>(s.trades),
                 static_cast<long long>(s.vol), s.book.resting_count(),
-                s.last_ns);
+                s.last_ns,
+                static_cast<unsigned long long>(s.compared),
+                static_cast<unsigned long long>(s.diverged));
   j += buf;
+  j += "\"last\":\"";
+  for (char c : s.last_line) { if (c != '"' && c != '\\') j += c; }
+  j += "\"}";
   return j.c_str();
 }
 
