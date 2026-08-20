@@ -59,6 +59,9 @@ export function EnginePanel(): React.JSX.Element {
   // when it scrolls away. On a page arguing about wasted cycles, burning them
   // offscreen would be the wrong position to hold.
   const [onscreen, setOnscreen] = useState(true);
+  // Which side, and how deep, the pointer is resting. A book is only useful if
+  // you can ask what taking it would cost.
+  const [sweep, setSweep] = useState<{ side: "bid" | "ask"; row: number } | null>(null);
 
   useEffect(() => {
     const el = shell.current;
@@ -119,6 +122,23 @@ export function EnginePanel(): React.JSX.Element {
   const scale = Math.max(1, bidCum[bidCum.length - 1] ?? 0, askCum[askCum.length - 1] ?? 0);
   const rows = Array.from({ length: 8 }, (_, i) => i);
   const spread = snap.bid > 0 && snap.ask > 0 ? snap.ask - snap.bid : null;
+  const mid = snap.bid > 0 && snap.ask > 0 ? (snap.bid + snap.ask) / 2 : 0;
+
+  // What a marketable order resting at the hovered level would actually pay:
+  // it eats every level in front of it, so the fill is the size-weighted mean
+  // of those levels and not the price you clicked. The gap between the two is
+  // the cost of the depth you crossed.
+  const quote = ((): null | { qty: number; avg: number; slip: number; notional: number } => {
+    if (!sweep || mid === 0) return null;
+    const side = sweep.side === "bid" ? snap.bids : snap.asks;
+    const take = side.slice(0, sweep.row + 1);
+    if (take.length === 0) return null;
+    const qty = take.reduce((a, l) => a + l[1], 0);
+    if (qty === 0) return null;
+    const notional = take.reduce((a, l) => a + l[0] * l[1], 0);
+    const avg = notional / qty;
+    return { qty, avg, slip: ((avg - mid) / mid) * 100, notional: notional / 100 };
+  })();
 
   if (error !== null) {
     return (
@@ -167,13 +187,26 @@ export function EnginePanel(): React.JSX.Element {
 
       {/* The book. Depth reads outward from the spread, which is where a
           trader's eye actually sits, rather than top-down like a table. */}
-      <div className="grid grid-cols-1 sm:grid-cols-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2" onMouseLeave={() => setSweep(null)}>
         <div className="order-2 px-6 py-5 sm:order-1 sm:border-r sm:border-instRule sm:px-8">
           <div className="clause !text-instInk/35 mb-3 text-right">bids</div>
           {rows.map((i) => {
             const l = snap.bids[i];
             return (
-              <div key={`b${i}`} className="flex h-6 items-center justify-end gap-3 font-mono text-[13px] tabular-nums">
+              <div
+                key={`b${i}`}
+                onMouseEnter={() => l && setSweep({ side: "bid", row: i })}
+                className="flex h-6 items-center justify-end gap-3 font-mono text-[13px] tabular-nums"
+                style={
+                  sweep?.side === "bid" && i <= sweep.row
+                    ? {
+                        background: "rgba(69,196,137,0.08)",
+                        boxShadow:
+                          i === sweep.row ? "inset 0 -1px 0 rgba(69,196,137,0.5)" : undefined,
+                      }
+                    : undefined
+                }
+              >
                 <div className="relative h-4 flex-1">
                   {l && (
                     <div
@@ -198,7 +231,20 @@ export function EnginePanel(): React.JSX.Element {
           {rows.map((i) => {
             const l = snap.asks[i];
             return (
-              <div key={`a${i}`} className="flex h-6 items-center gap-3 font-mono text-[13px] tabular-nums">
+              <div
+                key={`a${i}`}
+                onMouseEnter={() => l && setSweep({ side: "ask", row: i })}
+                className="flex h-6 items-center gap-3 font-mono text-[13px] tabular-nums"
+                style={
+                  sweep?.side === "ask" && i <= sweep.row
+                    ? {
+                        background: "rgba(255,111,97,0.08)",
+                        boxShadow:
+                          i === sweep.row ? "inset 0 -1px 0 rgba(255,111,97,0.5)" : undefined,
+                      }
+                    : undefined
+                }
+              >
                 <span className="w-20"><Price v={l ? l[0] : 0} tone="ask" /></span>
                 <span className="w-12 text-instInk/40">{l ? l[1] : ""}</span>
                 <div className="relative h-4 flex-1">
@@ -221,15 +267,29 @@ export function EnginePanel(): React.JSX.Element {
       </div>
 
       <div className="grid grid-cols-2 border-t border-instRule sm:grid-cols-4">
-        {([
-          ["spread", spread === null ? "n/a" : `${spread} ticks`],
-          ["messages", snap.msgs.toLocaleString()],
-          ["trades", snap.trades.toLocaleString()],
-          ["resting", snap.resting.toLocaleString()],
-        ] as const).map(([k, v]) => (
+        {(quote
+          ? ([
+              ["taking", `${quote.qty.toLocaleString()} lots`],
+              ["average fill", (quote.avg / 100).toFixed(4)],
+              ["against mid", `${quote.slip >= 0 ? "+" : ""}${quote.slip.toFixed(3)}%`],
+              ["notional", `$${Math.round(quote.notional).toLocaleString()}`],
+            ] as const)
+          : ([
+              ["spread", spread === null ? "n/a" : `${spread} ticks`],
+              ["messages", snap.msgs.toLocaleString()],
+              ["trades", snap.trades.toLocaleString()],
+              ["resting", snap.resting.toLocaleString()],
+            ] as const)
+        ).map(([k, v]) => (
           <div key={k} className="border-r border-instRule px-6 py-4 last:border-r-0 sm:px-8">
             <div className="clause !text-instInk/35">{k}</div>
-            <div className="mt-1 font-mono text-sm tabular-nums">{v}</div>
+            <div
+              className={`mt-1 font-mono text-sm tabular-nums ${
+                quote ? (sweep?.side === "bid" ? "text-bidLit" : "text-askLit") : ""
+              }`}
+            >
+              {v}
+            </div>
           </div>
         ))}
       </div>
