@@ -187,7 +187,10 @@ export function EnginePanel(): React.JSX.Element {
 
       {/* The book. Depth reads outward from the spread, which is where a
           trader's eye actually sits, rather than top-down like a table. */}
-      <div className="grid grid-cols-1 sm:grid-cols-2" onMouseLeave={() => setSweep(null)}>
+      <div
+        className="grid grid-cols-1 sm:grid-cols-2"
+        onPointerLeave={(e) => e.pointerType === "mouse" && setSweep(null)}
+      >
         <div className="order-2 px-6 py-5 sm:order-1 sm:border-r sm:border-instRule sm:px-8">
           <div className="clause !text-instInk/35 mb-3 text-right">bids</div>
           {rows.map((i) => {
@@ -195,8 +198,17 @@ export function EnginePanel(): React.JSX.Element {
             return (
               <div
                 key={`b${i}`}
-                onMouseEnter={() => l && setSweep({ side: "bid", row: i })}
-                className="flex h-6 items-center justify-end gap-3 font-mono text-[13px] tabular-nums"
+                onPointerEnter={(e) =>
+                  e.pointerType === "mouse" && l && setSweep({ side: "bid", row: i })
+                }
+                onPointerDown={(e) =>
+                  e.pointerType !== "mouse" &&
+                  l &&
+                  setSweep((s) =>
+                    s?.side === "bid" && s.row === i ? null : { side: "bid", row: i },
+                  )
+                }
+                className="flex h-6 cursor-pointer items-center justify-end gap-3 font-mono text-[13px] tabular-nums"
                 style={
                   sweep?.side === "bid" && i <= sweep.row
                     ? {
@@ -233,8 +245,17 @@ export function EnginePanel(): React.JSX.Element {
             return (
               <div
                 key={`a${i}`}
-                onMouseEnter={() => l && setSweep({ side: "ask", row: i })}
-                className="flex h-6 items-center gap-3 font-mono text-[13px] tabular-nums"
+                onPointerEnter={(e) =>
+                  e.pointerType === "mouse" && l && setSweep({ side: "ask", row: i })
+                }
+                onPointerDown={(e) =>
+                  e.pointerType !== "mouse" &&
+                  l &&
+                  setSweep((s) =>
+                    s?.side === "ask" && s.row === i ? null : { side: "ask", row: i },
+                  )
+                }
+                className="flex h-6 cursor-pointer items-center gap-3 font-mono text-[13px] tabular-nums"
                 style={
                   sweep?.side === "ask" && i <= sweep.row
                     ? {
