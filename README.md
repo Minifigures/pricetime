@@ -6,6 +6,12 @@ and *proven* correct rather than asserted correct.
 The name is the rule the whole thing turns on: **price-time priority**. Better
 prices execute first; at the same price, whoever arrived first executes first.
 
+**[Run it in your browser](https://pricetime-mu.vercel.app)** (no install). The
+page compiles this same C++ to WebAssembly and runs *both* implementations in
+the tab on the same input, comparing them event for event. The divergence
+count stays at zero. Hovering a price level quotes what sweeping to it would
+actually fill at.
+
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
 make test      # 68 tests, including ~500k-op differential fuzz
