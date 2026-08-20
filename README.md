@@ -69,7 +69,7 @@ The ways it goes wrong are the interesting part, and they are not hypothetical:
   used in the calculation had been cancelled mid-calculation. Under load the
   calculation took 20 ms instead of 1-2 ms, so a cancel always arrived during
   it, and **by design each recalculation absorbed only one additional
-  cancellation** — so it could never converge. Infinite loop. The failover went
+  cancellation**, so it could never converge. Infinite loop. The failover went
   to an engine with the validation removed, frozen at 11:11am, and 38,000+
   orders were excluded in violation of Nasdaq's own price/time priority rule.
   $10M penalty (SEC Rel. 34-69655).
@@ -185,7 +185,7 @@ Three policies: `None`, `CancelResting`, `CancelAggressor`.
 
 This is not decoration. **The CFTC fined Coinbase $6.5M in March 2021** because
 two of its own automated programs, Hedger and Replicator, *"matched orders with
-one another,"* inflating apparent volume — and that tainted data fed the CME
+one another,"* inflating apparent volume, and that tainted data fed the CME
 Bitcoin Real Time Index, CoinMarketCap and the NYSE Bitcoin Index. Not fraud;
 two well-intentioned internal algorithms crossing each other.
 
@@ -227,7 +227,7 @@ resting: 10 (oldest)  and  90 (newest),  aggressor buys 50
 **Why it matters beyond mechanics.** Field & Large (CFS WP 2008/40) found that
 pro-rata one-tick futures markets sit at the minimum spread essentially always,
 with depth around **100x mean trade size** and cancellation rates **above 96
-percent** — because rationing by size makes traders submit orders far larger
+percent**, because rationing by size makes traders submit orders far larger
 than they intend to fill. The allocation rule changes what participants *do*,
 not just who gets filled.
 
@@ -261,7 +261,7 @@ f_j(k) = (Q_j^k  -  Q_{j+1}^k) / V^k
 
 The Eurex identity is not obvious and is the nicest part: Eurex publishes
 Time-Pro-Rata as a recursion, `a_i = min(q_i, A_i(1 - (1 - q_i/Q_i)^2))`.
-Expanding by induction gives `A(Q_i^2 - Q_{i+1}^2)/V^2` — this kernel at k=2.
+Expanding by induction gives `A(Q_i^2 - Q_{i+1}^2)/V^2`, which is this kernel at k=2.
 Two exchanges documenting the same algorithm in two notations.
 
 Measured on Eurex's own published Example 7-7 (20, 20, 50 in time order,
@@ -388,7 +388,7 @@ exchange-assigned Order ID.
 Decoder path: gzip → classic pcap **or** pcapng → Ethernet → IPv4 → UDP →
 IEX-TP (protocol `0x8005`) → length-prefixed messages. Both container formats
 appear in the archive. Everything is little-endian, which is worth stating
-because Nasdaq ITCH — the feed everyone reaches for first — is big-endian with a
+because Nasdaq ITCH (the feed everyone reaches for first) is big-endian with a
 2-byte length prefix, and mixing them up yields prices in the trillions.
 
 Verified against a full trading day, **2024-12-23**:
@@ -407,7 +407,7 @@ a feed replay cannot exercise a matching path at all on its own: the venue's
 book is never crossed, so nothing ever matches.
 
 Each Order Executed message is therefore turned back into the aggressor that
-must have caused it — an IOC on the opposite side, at the reported price, for
+must have caused it: an IOC on the opposite side, at the reported price, for
 the reported size, from a different participant. That drives the real match path
 *and* yields a correctness check against reality.
 
@@ -553,7 +553,7 @@ matches; trimming gives 875 matches and zero mismatches.
 
 No book is ever written by more than one thread. A book belongs to one shard, a
 shard belongs to one thread, and a message routes to its shard by hashing
-(venue, symbol) through splitmix64 — dense small ids would otherwise cluster
+(venue, symbol) through splitmix64, because dense small ids would otherwise cluster
 badly on a power-of-two shard count. Inside a shard the engine is the same
 single-threaded code the differential fuzz already validated, so threading
 introduces no new matching semantics to get wrong.
@@ -583,7 +583,7 @@ x86 is forgiving.
 TSan reported it as a data race anyway, and TSan was right: concurrent
 non-atomic access is undefined behaviour under the C++ memory model whatever
 protocol sits on top, and the compiler is entitled to assume races never
-happen. The payload is now relaxed atomics ordered by two fences — the same
+happen. The payload is now relaxed atomics ordered by two fences, the same
 loads and stores on x86, but actually defined. TSan is clean and `make tsan`
 plus a CI job keep it that way.
 
