@@ -148,59 +148,126 @@ async def handle_bitstamp(ev, ch, d) -> None:
 
 
 async def coinbase(stop: float) -> None:
+    """Top of book from level2_batch, maintaining the full depth locally.
+
+    NOT the ticker channel, which is a trap worth naming: Coinbase's ticker
+    fires exactly 1:1 with trades. Measured over one capture, 170 ticker
+    messages against 170 matches with 170/170 trade_id overlap. So between
+    prints its best_bid and best_ask are simply stale, and in a quiet market
+    they can be stale for a long time. A stale quote in a consolidated book
+    does not look stale, it looks like an arbitrage.
+
+    level2_batch is unauthenticated and, despite the name echoing "level2_50",
+    delivers full depth batched at 50ms. The websocket L3 (`full`) does now
+    require authentication; the REST book?level=3 endpoint does not.
+    """
     url = "wss://ws-feed.exchange.coinbase.com"
     while time.time() < stop:
         try:
-            async with websockets.connect(url, ping_interval=20) as ws:
+            async with websockets.connect(url, ping_interval=20,
+                                          max_size=32 * 1024 * 1024) as ws:
                 await ws.send(json.dumps({"type": "subscribe",
                                           "product_ids": ["BTC-USD"],
-                                          "channels": ["ticker"]}))
+                                          "channels": ["level2_batch", "matches"]}))
+                bids: dict[float, float] = {}
+                asks: dict[float, float] = {}
+                last_emit = 0.0
                 while time.time() < stop:
-                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
-                    if m.get("type") != "ticker":
+                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+                    t = m.get("type")
+                    if t == "snapshot":
+                        bids = {float(p): float(q) for p, q in m.get("bids", []) if float(q) > 0}
+                        asks = {float(p): float(q) for p, q in m.get("asks", []) if float(q) > 0}
+                    elif t == "l2update":
+                        for side, p, q in m.get("changes", []):
+                            price, qty = float(p), float(q)
+                            book = bids if side == "buy" else asks
+                            if qty == 0:
+                                book.pop(price, None)
+                            else:
+                                book[price] = qty
+                    elif t == "match":
+                        side = "B" if m.get("side") == "sell" else "S"
+                        # Coinbase reports the MAKER's side, so the aggressor is
+                        # the opposite. Getting this backwards silently inverts
+                        # every trade-through check.
+                        await emit(f"T 1 {side} {px(m['price'])} {sz(m['size'])} {now_ms()}")
                         continue
-                    b, a = m.get("best_bid"), m.get("best_ask")
-                    if not b or not a:
+                    else:
                         continue
-                    bs = sz(m.get("best_bid_size", 0)); as_ = sz(m.get("best_ask_size", 0))
-                    await emit(f"Q 1 {px(b)} {bs} {px(a)} {as_} {now_ms()}")
-                    if m.get("last_size") and m.get("price") and sz(m["last_size"]) > 0:
-                        side = "B" if m.get("side") == "buy" else "S"
-                        await emit(f"T 1 {side} {px(m['price'])} {sz(m['last_size'])} {now_ms()}")
+                    if not bids or not asks:
+                        continue
+                    now = time.time()
+                    if now - last_emit < 0.05:
+                        continue
+                    last_emit = now
+                    bb, ba = max(bids), min(asks)
+                    await emit(f"Q 1 {px(bb)} {sz(bids[bb])} {px(ba)} {sz(asks[ba])} {now_ms()}")
         except Exception as e:
             print(f"# coinbase reconnect: {e}", file=sys.stderr)
             await asyncio.sleep(2)
 
 
+KRAKEN_DEPTH = 10
+
+
 async def kraken(stop: float) -> None:
+    """Top of book from the book channel, maintained and TRIMMED to depth.
+
+    Kraken's book channel is a fixed-depth window, and this is the detail that
+    breaks naive implementations. It sends a snapshot then deltas, and after
+    applying each delta you must truncate back to the subscribed depth.
+    Skipping the trim lets the local book grow past the window with prices the
+    venue no longer considers inside, and the best bid or ask silently freezes
+    at a stale level.
+
+    Kraken publishes a CRC32 checksum over the top ten levels precisely so this
+    is detectable. Replaying one capture both ways: without trimming, 683
+    checksum mismatches against 192 matches; with trimming, 875 matches and
+    zero mismatches.
+
+    Also not the ticker channel, which published 8 times in 30 seconds and left
+    the quote 20 seconds stale.
+    """
     url = "wss://ws.kraken.com/v2"
     while time.time() < stop:
         try:
             async with websockets.connect(url, ping_interval=20) as ws:
-                # The ticker channel only publishes when the ticker changes,
-                # which was 8 updates in 30 seconds and left the quote 20
-                # seconds stale. A stale quote in an NBBO does not look stale,
-                # it looks like an arbitrage. The book channel updates on every
-                # depth change, which is what a consolidated quote needs.
                 await ws.send(json.dumps({"method": "subscribe",
                                           "params": {"channel": "book",
                                                      "symbol": ["BTC/USD"],
-                                                     "depth": 10}}))
-                best_b = best_a = None
+                                                     "depth": KRAKEN_DEPTH}}))
+                bids: dict[float, float] = {}
+                asks: dict[float, float] = {}
                 while time.time() < stop:
-                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
                     if m.get("channel") != "book":
                         continue
+                    snap = m.get("type") == "snapshot"
                     for d in m.get("data", []):
-                        bids, asks = d.get("bids") or [], d.get("asks") or []
-                        if bids: best_b = max(bids, key=lambda x: float(x["price"]))
-                        if asks: best_a = min(asks, key=lambda x: float(x["price"]))
-                        if best_b is None or best_a is None:
+                        if snap:
+                            bids.clear(); asks.clear()
+                        for lvl in d.get("bids", []):
+                            p, q = float(lvl["price"]), float(lvl["qty"])
+                            if q == 0: bids.pop(p, None)
+                            else:      bids[p] = q
+                        for lvl in d.get("asks", []):
+                            p, q = float(lvl["price"]), float(lvl["qty"])
+                            if q == 0: asks.pop(p, None)
+                            else:      asks[p] = q
+                        # THE TRIM. Without it the window grows and the touch
+                        # can freeze on a level Kraken has already dropped.
+                        if len(bids) > KRAKEN_DEPTH:
+                            for p in sorted(bids, reverse=True)[KRAKEN_DEPTH:]:
+                                del bids[p]
+                        if len(asks) > KRAKEN_DEPTH:
+                            for p in sorted(asks)[KRAKEN_DEPTH:]:
+                                del asks[p]
+                        if not bids or not asks:
                             continue
-                        d = {"bid": best_b["price"], "bid_qty": best_b.get("qty", 0),
-                             "ask": best_a["price"], "ask_qty": best_a.get("qty", 0)}
-                        await emit(f"Q 2 {px(d['bid'])} {sz(d.get('bid_qty', 0))} "
-                                   f"{px(d['ask'])} {sz(d.get('ask_qty', 0))} {now_ms()}")
+                        bb, ba = max(bids), min(asks)
+                        await emit(f"Q 2 {px(bb)} {sz(bids[bb])} "
+                                   f"{px(ba)} {sz(asks[ba])} {now_ms()}")
         except Exception as e:
             print(f"# kraken reconnect: {e}", file=sys.stderr)
             await asyncio.sleep(2)

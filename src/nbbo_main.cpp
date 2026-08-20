@@ -162,10 +162,13 @@ int main(int argc, char** argv) {
     // Coinbase 370, so any instantaneous comparison mostly reflects which
     // venue published most recently. These numbers are reported because
     // suppressing them would be worse, not because they are a finding.
-    std::printf("\n\n  %sinverted and flagged counts are NOT a finding. Crypto venues have\n"
-                "  no trade-through rule and no shared clock, and these venues publish\n"
-                "  at very different rates, so the counters largely measure update-rate\n"
-                "  asymmetry rather than dislocation. The NBBO itself is real.%s\n",
+    std::printf("\n\n  %sA persistently inverted consolidated book is the CORRECT state here,\n"
+                "  not an error. Each venue quotes a $0.01 to $0.10 spread internally\n"
+                "  yet they sit $3 to $10 apart from each other. Nothing closes that\n"
+                "  gap because taker fees of 0.26 to 0.6 percent are $180 to $400 on a\n"
+                "  $69k trade: the dislocation is one to two orders of magnitude too\n"
+                "  small to arbitrage. Crypto has no order-protection rule, so nothing\n"
+                "  forces the venues into line either.%s\n",
                 kDim, kReset);
     std::printf("\n\n  %sTAPE%s\n", kDim, kReset);
     for (const auto& t : tape) std::printf("   %s\n", t.c_str());

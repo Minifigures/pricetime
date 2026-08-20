@@ -440,7 +440,13 @@ all quote BTC/USD concurrently, without authentication.
 | **Kraken** | top of book only |
 
 The display labels which venues are reconstructed and which are quotes. Claiming
-depth that was never sent is the easy lie here. Binance is deliberately excluded:
+depth that was never sent is the easy lie here.
+
+**Nothing captured is committed.** Bitstamp is the only one of these venues whose
+terms affirmatively permit redistribution (*"Bitstamp allows the incorporation and
+redistribution of our exchange data"*). Coinbase, Kraken, Gemini and OKX all
+prohibit it explicitly. So the feed streams live and prints to stdout, and no
+market data from any venue is checked into this repository. Binance is deliberately excluded:
 its liquid pair is BTC/**USDT**, a different instrument, and folding it into a
 USD consolidated quote would be wrong in a way that is invisible on screen.
 
@@ -462,20 +468,45 @@ not exist. Moved to the book channel (1,031 updates in the same window) and
 added quote ageing on top, which is exactly why real consolidated feeds carry
 per-participant timestamps.
 
-### What is deliberately not claimed
+### The finding: a market with no order-protection rule stays inverted
 
-The tool reports counts of inverted and flagged quotes, and then says in its own
-output that **they are not a finding**. Crypto venues have no trade-through
-rule, no consolidated tape, and no shared clock, and arbitrage between them is
-bounded by transfer latency and pre-positioned capital, so an inverted
-consolidated quote is ordinary rather than a violation.
+The consolidated book is inverted essentially all of the time, and that is the
+**correct** state rather than a bug. The evidence, cross-checked against each
+venue's own REST API rather than taken from my own output:
 
-More decisively, the venues publish at wildly different rates: **14,893 messages
-from Bitstamp against 370 from Coinbase** in one 35-second capture. Any
-instantaneous cross-venue comparison is dominated by which venue published most
-recently. The NBBO itself is real; those counters mostly measure update-rate
-asymmetry, and a headline number that would not survive scrutiny is worth less
-than saying so.
+```
+bitstamp  bid 69449.38  ask 69449.39   own spread $0.01
+coinbase  bid 69452.18  ask 69452.19   own spread $0.01
+kraken    bid 69458.90  ask 69459.00   own spread $0.10
+```
+
+Every venue quotes a penny-wide market internally, and they sit **$3 to $10
+apart from each other**. Nothing closes that gap, because taker fees of 0.26 to
+0.6 percent are **$180 to $400** on a $69,000 trade. The dislocation is one to
+two orders of magnitude too small to arbitrage. And crypto has no Reg NMS
+order-protection rule, so nothing forces the venues into line either.
+
+This is the natural experiment US equities cannot run: what a consolidated quote
+looks like *without* a trade-through rule. Worth noting while the SEC has a live
+proposal (Rel. 34-105655, 2026-06-17) to rescind exactly that rule.
+
+**The engine must therefore tolerate a crossed NBBO as valid.** An implementation
+that asserts `best_bid < best_ask` fires immediately on real data.
+
+### Two bugs the venues' own documentation does not warn you about
+
+**Coinbase's `ticker` channel fires 1:1 with trades.** Measured: 170 ticker
+messages against 170 matches, 170/170 trade-id overlap. Between prints its
+`best_bid` and `best_ask` are stale, and in a quiet market they stay stale.
+`level2_batch` is unauthenticated and delivers full depth batched at 50ms, so
+that is what this uses.
+
+**Kraken's book channel is a fixed-depth window and must be trimmed after every
+delta.** Without the trim, the local book grows past the window with levels the
+venue no longer considers inside, and the touch silently freezes. Kraken
+publishes a CRC32 over the top ten levels precisely so this is detectable:
+replaying one capture, no trim gives 683 checksum mismatches against 192
+matches; trimming gives 875 matches and zero mismatches.
 
 ---
 
