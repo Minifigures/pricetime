@@ -1,5 +1,6 @@
 #include "pricetime/iex.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -39,6 +40,9 @@ bool read_exact(std::FILE* f, char* dst, std::size_t n) {
 
 bool DeepPlusReader::open(const std::string& path) {
   close();
+  error_.clear();
+  truncated_ = false;
+  at_record_boundary_ = true;
   // Single-quote the path and escape embedded quotes; these files live under
   // user-chosen directories.
   std::string safe;
@@ -100,8 +104,18 @@ bool DeepPlusReader::open(const std::string& path) {
 
 void DeepPlusReader::close() {
   if (pipe_ != nullptr) {
-    ::pclose(pipe_);
+    const int status = ::pclose(pipe_);
     pipe_ = nullptr;
+    // Only meaningful if the reader ran to what it took for a clean end. A
+    // caller that stops early leaves gunzip to die of SIGPIPE, which is not
+    // corruption. gzip reports CRC and length failures only in its exit code,
+    // and that code was previously discarded.
+    if (status != 0 && at_record_boundary_ && !truncated_) {
+      truncated_ = true;
+      if (error_.empty())
+        error_ = "decompressor exited non-zero: the capture is corrupt or "
+                 "truncated, so the decoded stream is incomplete";
+    }
   }
   pkt_.clear();
   pkt_pos_ = 0;
@@ -111,11 +125,23 @@ void DeepPlusReader::close() {
 // Classic pcap: a 16-byte record header then the frame.
 bool DeepPlusReader::next_frame_pcap(std::vector<char>& frame) {
   char rh[kPcapRecordHeader];
-  if (!read_exact(pipe_, rh, kPcapRecordHeader)) return false;
+  at_record_boundary_ = true;
+  if (!read_exact(pipe_, rh, kPcapRecordHeader)) return false;  // clean end
+  at_record_boundary_ = false;
   const auto incl = le<std::uint32_t>(rh + 8);
-  if (incl == 0 || incl > (1u << 20)) return false;
+  if (incl == 0 || incl > (1u << 20)) {
+    truncated_ = true;
+    error_ = "implausible record length in capture, stopping";
+    return false;
+  }
   frame.resize(incl);
-  return read_exact(pipe_, frame.data(), incl);
+  if (!read_exact(pipe_, frame.data(), incl)) {
+    truncated_ = true;
+    error_ = "capture ends mid-record";
+    return false;
+  }
+  at_record_boundary_ = true;
+  return true;
 }
 
 // pcapng: a stream of typed blocks. Only Enhanced Packet Blocks carry frames;
@@ -124,13 +150,24 @@ bool DeepPlusReader::next_frame_pcap(std::vector<char>& frame) {
 bool DeepPlusReader::next_frame_pcapng(std::vector<char>& frame) {
   for (;;) {
     char bh[8];
-    if (!read_exact(pipe_, bh, 8)) return false;
+    at_record_boundary_ = true;
+    if (!read_exact(pipe_, bh, 8)) return false;  // clean end
+    at_record_boundary_ = false;
     const auto type  = le<std::uint32_t>(bh);
     const auto total = le<std::uint32_t>(bh + 4);
-    if (total < 12 || total > (1u << 24)) return false;
+    if (total < 12 || total > (1u << 24)) {
+      truncated_ = true;
+      error_ = "implausible pcapng block length, stopping";
+      return false;
+    }
 
     std::vector<char> body(total - 8);
-    if (!read_exact(pipe_, body.data(), body.size())) return false;
+    if (!read_exact(pipe_, body.data(), body.size())) {
+      truncated_ = true;
+      error_ = "capture ends mid-block";
+      return false;
+    }
+    at_record_boundary_ = true;
     if (type != kPcapNgEPB) continue;
     if (body.size() < 20) continue;
 
@@ -162,11 +199,27 @@ bool DeepPlusReader::fill_packet() {
     const char* tp = frame.data() + udp_body;
     if (le<std::uint16_t>(tp + 2) != kProtocolDeepPlus) continue;
 
-    const auto msg_count = le<std::uint16_t>(tp + 16);
+    // IEX-TP v1 header, 40 bytes: version(0) reserved(1) protocol(2..3)
+    // channel(4..7) session(8..11) payload length(12..13) message count(14..15)
+    // stream offset(16..23) first sequence(24..31) send time(32..39). Message
+    // count was previously read from offset 16, which is the low half of the
+    // stream offset. That number happens to be a large no-op ceiling most of
+    // the time, because the loop is also bounded by the block size, so the
+    // decode looked correct. It is not: whenever the low 16 bits of the stream
+    // offset came out zero the whole packet was dropped, and whenever they came
+    // out below the true count the tail of the packet was dropped.
+    const auto payload_len = le<std::uint16_t>(tp + 12);
+    const auto msg_count = le<std::uint16_t>(tp + 14);
     if (msg_count == 0) continue;
 
-    const std::size_t block = static_cast<std::size_t>(incl) - udp_body -
+    // Prefer the length the protocol states over what the capture happens to
+    // carry, so Ethernet padding or an included FCS cannot become message
+    // bytes. Clamp to what is actually present: the header is not trusted.
+    const std::size_t avail = static_cast<std::size_t>(incl) - udp_body -
                               kIexTpHeader;
+    const std::size_t block = payload_len > 0
+                                  ? std::min(static_cast<std::size_t>(payload_len), avail)
+                                  : avail;
     pkt_.assign(tp + kIexTpHeader, block);  // just the message block
     pkt_pos_ = 0;
     remaining_in_packet_ = msg_count;

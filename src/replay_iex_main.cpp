@@ -129,6 +129,20 @@ int main(int argc, char** argv) {
               static_cast<double>(rd.messages()) / decode_secs / 1e6);
   std::printf("  symbols seen    : %zu\n", per_symbol.size());
 
+  // A short read used to be indistinguishable from a clean end of file, so a
+  // half-decompressed capture produced a confident match percentage over
+  // whatever fraction happened to arrive. Say so loudly instead: the numbers
+  // below are evidence, and evidence over an unknown subset is not evidence.
+  const bool incomplete = rd.truncated();
+  if (incomplete) {
+    std::printf("\n");
+    std::printf("  WARNING: the capture did not read to completion.\n");
+    std::printf("           %s\n", rd.error().c_str());
+    std::printf("           Everything below covers only the portion that was\n");
+    std::printf("           read, so the percentages are NOT a validation of\n");
+    std::printf("           the full session.\n");
+  }
+
   if (chosen.empty()) {
     auto best = std::max_element(
         per_symbol.begin(), per_symbol.end(),
@@ -299,6 +313,8 @@ int main(int argc, char** argv) {
   std::printf("\n  VALIDATION against the venue's own execution reports\n");
   std::printf("    executions replayed        : %llu\n",
               static_cast<unsigned long long>(execs));
+  if (incomplete)
+    std::printf("    (over a partial capture, see the warning above)\n");
   std::printf("    matched the reported order : %llu (%.1f%%)\n",
               static_cast<unsigned long long>(exec_matched),
               execs ? 100.0 * static_cast<double>(exec_matched) /
@@ -320,5 +336,8 @@ int main(int argc, char** argv) {
     std::printf("  findings written to surveillance.json\n"
                 "  optional narrative: ./scripts/explain.sh surveillance.json\n\n");
   }
-  return 0;
+  // Non-zero on an incomplete capture: this binary's output is used as
+  // evidence, and a caller that only checks the exit status should not be
+  // told a partial run succeeded.
+  return incomplete ? 2 : 0;
 }

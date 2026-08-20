@@ -99,6 +99,13 @@ class DeepPlusReader {
   [[nodiscard]] std::uint64_t skipped()  const noexcept { return skipped_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
+  // True when the stream ended in the middle of a record, or when the
+  // decompressor reported failure after a read that looked like a clean end.
+  // A short read is otherwise indistinguishable from end-of-file, which meant
+  // a half-read capture produced a confident, wrong "100% matched" report.
+  // Callers that publish match rates must check this before believing them.
+  [[nodiscard]] bool truncated() const noexcept { return truncated_; }
+
  private:
   enum class Container { Pcap, PcapNg };
 
@@ -109,6 +116,8 @@ class DeepPlusReader {
   Container   container_ = Container::Pcap;
   std::FILE*  pipe_ = nullptr;
   std::string error_;
+  bool        truncated_ = false;
+  bool        at_record_boundary_ = true;
 
   std::string pkt_;        // current packet payload (UDP body)
   std::size_t pkt_pos_ = 0;

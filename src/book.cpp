@@ -21,7 +21,22 @@ Book::Book(Price floor_px, Price ceil_px, SelfTradePolicy stp,
   hot_ceil_  = std::min<Price>(ceil_, hot_floor_ + hot_w - 1);
   if (hot_ceil_ < hot_floor_) hot_ceil_ = hot_floor_;
 
-  const Price raw_span = hot_ceil_ - hot_floor_ + 1;
+  // span_ is a 32-bit index while hot_floor_/hot_ceil_ stay 64-bit, so a band
+  // wider than the index type used to truncate the ladder while is_hot() went
+  // on claiming those prices were hot. The two then disagreed and the very
+  // first order indexed past the end of the vector. Clamp the hot ceiling to
+  // what the ladder can actually address so they cannot diverge; prices above
+  // it take the cold tier, which is what the cold tier is for.
+  //
+  // The practical cap is far below the index limit on purpose. A flat ladder
+  // is only worth having while it stays cache resident, and 2^22 ticks is
+  // already 134 MB across both sides, sixteen times the default.
+  constexpr Price kMaxHotSpan = 1 << 22;
+  Price raw_span = hot_ceil_ - hot_floor_ + 1;
+  if (raw_span > kMaxHotSpan) {
+    raw_span = kMaxHotSpan;
+    hot_ceil_ = hot_floor_ + kMaxHotSpan - 1;
+  }
   span_ = static_cast<Idx>(raw_span > 0 ? raw_span : 0);
   bid_lvls_.resize(span_);
   ask_lvls_.resize(span_);
@@ -506,6 +521,22 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
     out.push_back(e);
     return;
   }
+  // Out of band is rejected here, before anything is emitted or unlinked, so
+  // that replace and submit answer the same way about the same price. This
+  // used to fall through: the client got an affirmative REPLACED, the order
+  // was then unlinked and freed with no Canceled event, and a later cancel
+  // came back UnknownOrderId. Anything reconstructing state from the event
+  // log believed the order was still live, and the two engines burned a
+  // different number of sequence numbers from that point on.
+  //
+  // A rejected replace leaves the resting order exactly as it was.
+  if (!in_band(r.price)) {
+    Event e;
+    e.kind = Event::Kind::Rejected; e.order_id = r.id; e.seq = next_seq_++;
+    e.reason = RejectReason::InvalidPrice;
+    out.push_back(e);
+    return;
+  }
 
   const Idx  n        = it->second;
   const Node existing = pool_[n];
@@ -530,8 +561,6 @@ void Book::replace(const ReplaceOrder& r, EventLog& out) {
   if (L.head == kNil) erase_level(existing.side, old_px);
   free_node(n);
   index_.erase(it);
-
-  if (!in_band(r.price)) return;  // replaced out of band: order is gone
 
   NewOrder shim;
   shim.id = existing.id; shim.owner = existing.owner;
