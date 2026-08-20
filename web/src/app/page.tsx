@@ -6,7 +6,7 @@ const HEADLINE: ReadonlyArray<readonly [string, string, string]> = [
   ["50,163,616", "real orders replayed", "one full trading day from a live US exchange"],
   ["100.0%", "agreement with the venue", "1,499 of 1,499 executions matched exactly"],
   ["40x", "faster after one fix", "1,986 ns to 50 ns per order"],
-  ["45", "automated tests", "~200,000 fuzzed operations"],
+  ["16,807", "crash points verified", "killed at every byte, all recovered exactly"],
 ];
 
 const FACTS: ReadonlyArray<readonly [string, string]> = [
@@ -21,6 +21,10 @@ const FACTS: ReadonlyArray<readonly [string, string]> = [
   [
     "It grades itself against the exchange's own records.",
     "The feed says which orders were executed. The engine reconstructs what must have happened and checks whether it reaches the same conclusion. For Apple: 1,499 of 1,499.",
+  ],
+  [
+    "It survives being killed, and proves it.",
+    "Every input is journalled before it is applied, and because the engine is deterministic those inputs are the state. The process was killed at every one of the 16,807 byte offsets in the journal; 16,406 of those cuts landed mid-record, and every one recovered to byte-identical state.",
   ],
   [
     "A hypothesis it got wrong is published, not deleted.",
@@ -119,6 +123,40 @@ export default function Home(): React.JSX.Element {
 
       <section className="mb-16 rounded-lg border border-line bg-panel p-6">
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-300">
+          Two of those three were recovery failures
+        </h2>
+        <p className="max-w-2xl text-sm leading-relaxed text-neutral-400">
+          Nasdaq&apos;s failover engine held state frozen nineteen minutes
+          stale. NYSE could not answer whether 2,800 auctions had run, because
+          no authoritative record existed to ask. Both are the same shape:
+          state lived in one place, and there was no way to rebuild it
+          elsewhere and prove the rebuild was right.
+        </p>
+        <p className="mt-3 max-w-2xl text-sm leading-relaxed text-neutral-400">
+          pricetime journals every input before applying it. Because the engine
+          is deterministic, the inputs <span className="text-neutral-100">are</span>{" "}
+          the state. Testing it meant killing the process at{" "}
+          <span className="text-neutral-100">every one of the 16,807 byte
+          offsets</span> in the journal and demanding byte-identical recovery
+          each time. 16,406 of those cuts landed mid-record.
+        </p>
+        <pre className="mt-4 overflow-x-auto rounded border border-line bg-ink p-4 font-mono text-xs leading-relaxed text-neutral-400">
+{`2. CRASH      process killed mid-append
+              journal was 214931 bytes, 3616 bytes lost
+3. RECOVERY   read 4914 records from a cold start
+4. VERDICT    event streams byte-identical : yes
+              book state identical         : yes
+              inputs lost to the crash     : 86 of 5000`}
+        </pre>
+        <p className="mt-3 max-w-2xl text-xs leading-relaxed text-neutral-600">
+          That last line is the honest part. Inputs after the cut are genuinely
+          gone, and an operator is told exactly how far the world rewound
+          rather than that everything is fine.
+        </p>
+      </section>
+
+      <section className="mb-16 rounded-lg border border-line bg-panel p-6">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-neutral-300">
           The finding it surfaced in real data
         </h2>
         <p className="max-w-2xl text-sm leading-relaxed text-neutral-400">
@@ -149,7 +187,8 @@ cd pricetime
 
 make test     # 45 tests, including the differential fuzz
 make bench    # latency percentiles, four flow regimes
-make replay   # live order book in your terminal`}
+make replay   # live order book in your terminal
+make recover  # journal a run, crash it, recover, prove it`}
         </pre>
       </section>
 
