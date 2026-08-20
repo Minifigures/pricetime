@@ -71,7 +71,8 @@ class Book {
        std::size_t expected_orders = 1u << 16,
        Price hot_ticks = kDefaultHotTicks,
        Allocation alloc = Allocation::Fifo,
-       int fifo_percent = kDefaultFifoPercent);
+       int fifo_percent = kDefaultFifoPercent,
+       int time_weight = kDefaultTimeWeight);
 
   void submit(const NewOrder& o, EventLog& out);
   void cancel(const CancelOrder& c, EventLog& out);
@@ -186,11 +187,13 @@ class Book {
   SelfTradePolicy stp_      = SelfTradePolicy::None;
   Allocation      alloc_    = Allocation::Fifo;
   int             fifo_pct_ = kDefaultFifoPercent;
+  int             time_weight_ = kDefaultTimeWeight;
   Seq             next_seq_ = 1;
   // Scratch reused across matches so the pro-rata pass allocates nothing on
   // the hot path. Cleared, never freed.
   mutable std::vector<Idx> pr_nodes_;
   mutable std::vector<Qty> pr_share_;
+  mutable std::vector<long double> pr_suffix_;
 };
 
 }  // namespace pricetime

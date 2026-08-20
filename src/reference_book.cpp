@@ -1,5 +1,7 @@
 #include "pricetime/reference_book.hpp"
 
+#include <cmath>
+
 namespace pricetime {
 namespace {
 
@@ -26,6 +28,50 @@ struct MatchResult {
 // economic point and the whole reason it changes participant behaviour.
 //
 // Returns per-order allocations aligned to `level`, summing to at most `want`.
+// Time-weighted shares: f_j(k) = (Q_j^k - Q_{j+1}^k) / V^k, with Q_j the
+// cumulative eligible volume from order j onward in TIME order and V = Q_1.
+//
+// The exponent is what makes this one function instead of five. k=1 collapses
+// to Q_j - Q_{j+1} over V, which is just q_j/V, pure pro-rata. Larger k pushes
+// weight toward the front of the queue, and the limit is FIFO. Eurex's
+// Time-Pro-Rata recursion expands by induction to exactly this at k=2, and ICE
+// runs k=2 on Euribor and k=4 on Short Sterling.
+//
+// Computed in long double rather than integers because Q^k overflows int64 for
+// any realistic book beyond k=2: a level holding a million lots cubed is 10^18
+// and a fourth power is 10^24. Eurex warns its own implementers that the
+// arithmetic precision applied affects the result, so the choice is stated
+// rather than left implicit. The shares telescope to 1 exactly in exact
+// arithmetic, so any residual from rounding falls through to the FIFO step.
+std::vector<Qty> time_weighted_shares(const std::vector<RestingOrder>& level,
+                                      const std::vector<bool>& eligible,
+                                      Qty want, int k) {
+  std::vector<Qty> share(level.size(), 0);
+  const std::size_t n = level.size();
+  if (n == 0 || want <= 0) return share;
+
+  // Suffix sums of eligible quantity, in time order.
+  std::vector<long double> suffix(n + 1, 0.0L);
+  for (std::size_t i = n; i-- > 0;)
+    suffix[i] = suffix[i + 1] +
+                (eligible[i] ? static_cast<long double>(level[i].open) : 0.0L);
+  const long double V = suffix[0];
+  if (V <= 0.0L) return share;
+
+  const long double Vk = std::pow(V, static_cast<long double>(k));
+  for (std::size_t i = 0; i < n; ++i) {
+    if (!eligible[i]) continue;
+    const long double a = std::pow(suffix[i],     static_cast<long double>(k));
+    const long double b = std::pow(suffix[i + 1], static_cast<long double>(k));
+    const long double f = (a - b) / Vk;
+    Qty q = static_cast<Qty>(f * static_cast<long double>(want));
+    q = std::min(q, level[i].open);
+    q = std::min(q, want);
+    share[i] = q > 0 ? q : 0;
+  }
+  return share;
+}
+
 std::vector<Qty> prorata_shares(const std::vector<RestingOrder>& level,
                                 const std::vector<bool>& eligible, Qty want) {
   std::vector<Qty> share(level.size(), 0);
@@ -60,7 +106,8 @@ MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
                      Qty want, OrderId aggr_id, ParticipantId aggr_owner,
                      SelfTradePolicy stp, Seq& next_seq, EventLog& out,
                      std::unordered_map<OrderId, std::pair<Side, Price>>& live,
-                     Side contra_side, Allocation alloc, int fifo_pct) {
+                     Side contra_side, Allocation alloc, int fifo_pct,
+                     int time_weight) {
   MatchResult res;
   Qty remaining = want;
 
@@ -95,14 +142,31 @@ MatchResult do_match(SideMap& contra, Side aggressor_side, Price limit,
     // Pro-rata runs a proportional pass, then falls through to the FIFO loop
     // below to place the rounding remainder. Under plain FIFO this is skipped
     // entirely and behaviour is unchanged.
-    if ((alloc == Allocation::ProRata || alloc == Allocation::Split) &&
-        remaining > 0 && !level.empty()) {
+    // CME's FIFO Exception, verbatim: "In the scenario where an aggressing
+    // order quantity is greater than or equal to the displayed quantity in an
+    // instrument at a given price level, for matching efficiency, CME Globex
+    // applies FIFO in lieu of the designated product algorithm."
+    //
+    // The outcome is identical either way when the aggressor takes the whole
+    // level, since every resting order fills completely. What changes is the
+    // work done and the order the fills are emitted in. Skipping the
+    // proportional pass here is both what CME does and strictly cheaper.
+    Qty level_total = 0;
+    for (const auto& ro : level) level_total += ro.open;
+    const bool sweeps_level = remaining >= level_total;
+
+    if ((alloc == Allocation::ProRata || alloc == Allocation::Split ||
+         alloc == Allocation::TimeWeighted) &&
+        remaining > 0 && !level.empty() && !sweeps_level) {
       std::vector<bool> eligible(level.size(), true);
       if (stp != SelfTradePolicy::None && aggr_owner != kAnonymous)
         for (std::size_t k = 0; k < level.size(); ++k)
           if (level[k].owner == aggr_owner) eligible[k] = false;
 
-      const auto share = prorata_shares(level, eligible, remaining);
+      const auto share = (alloc == Allocation::TimeWeighted)
+                             ? time_weighted_shares(level, eligible, remaining,
+                                                    time_weight)
+                             : prorata_shares(level, eligible, remaining);
       // Emit in level order so the event stream stays deterministic.
       for (std::size_t k = 0; k < level.size() && remaining > 0; ++k) {
         const Qty q = std::min(share[k], remaining);
@@ -253,9 +317,11 @@ void ReferenceBook::submit(const NewOrder& o, EventLog& out) {
   const MatchResult mr =
       (o.side == Side::Buy)
           ? do_match(asks_, o.side, limit, o.qty, o.id, o.owner, stp_,
-                     next_seq_, out, live_, Side::Sell, alloc_, fifo_pct_)
+                     next_seq_, out, live_, Side::Sell, alloc_, fifo_pct_,
+                     time_weight_)
           : do_match(bids_, o.side, limit, o.qty, o.id, o.owner, stp_,
-                     next_seq_, out, live_, Side::Buy, alloc_, fifo_pct_);
+                     next_seq_, out, live_, Side::Buy, alloc_, fifo_pct_,
+                     time_weight_);
 
   const Qty remainder = o.qty - mr.filled;
   if (remainder <= 0) return;

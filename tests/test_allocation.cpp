@@ -167,6 +167,90 @@ TEST(split_at_0_percent_is_exactly_prorata) {
   CHECK(run(Allocation::Split, 0) == run(Allocation::ProRata, 0));
 }
 
+// The time-weighted kernel: f_j(k) = (Q_j^k - Q_{j+1}^k) / V^k over the
+// cumulative volume from order j onward, in time order.
+//
+// One formula covers five published exchange algorithms. k=1 is pure pro-rata
+// (CME 'C', Eurex Pro-Rata), k=2 is Eurex Time-Pro-Rata and ICE's Euribor and
+// SARON and SONIA and SOFR, k=4 is ICE Short Sterling and Euroswiss, and the
+// limit as k grows is FIFO.
+TEST(time_weighted_at_k1_is_exactly_prorata) {
+  // The degenerate case. At k=1 the kernel telescopes to q_j / V, which IS
+  // pro-rata. If these differ, the kernel is not what it claims to be.
+  auto run = [](Allocation a, int k) {
+    Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+           Book::kDefaultHotTicks, a, 40, k);
+    EventLog log;
+    b.submit(lim(1, Side::Sell, 10000, 20), log);
+    b.submit(lim(2, Side::Sell, 10000, 20), log);
+    b.submit(lim(3, Side::Sell, 10000, 50), log);
+    log.clear();
+    b.submit(lim(4, Side::Buy, 10000, 25), log);
+    return fills(log);
+  };
+  CHECK(run(Allocation::TimeWeighted, 1) == run(Allocation::ProRata, 1));
+}
+
+TEST(time_weighted_shifts_toward_the_front_of_the_queue_as_k_rises) {
+  // Same book as Eurex's own published Example 7-7 (20, 20, 50 in time order,
+  // aggressor 25) so the progression is checkable against their table.
+  auto oldest_gets = [](int k) {
+    Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+           Book::kDefaultHotTicks, Allocation::TimeWeighted, 40, k);
+    EventLog log;
+    b.submit(lim(1, Side::Sell, 10000, 20), log);
+    b.submit(lim(2, Side::Sell, 10000, 20), log);
+    b.submit(lim(3, Side::Sell, 10000, 50), log);
+    log.clear();
+    b.submit(lim(4, Side::Buy, 10000, 25), log);
+    Qty to1 = 0;
+    for (const auto& [id, q] : fills(log)) if (id == 1) to1 += q;
+    return to1;
+  };
+  const Qty k1 = oldest_gets(1), k2 = oldest_gets(2), k4 = oldest_gets(4);
+  CHECK_EQ(k1, 7);    // pro-rata: size wins
+  CHECK_EQ(k2, 11);   // Eurex TPR / ICE Euribor
+  CHECK_EQ(k4, 17);   // ICE Short Sterling: much closer to FIFO
+  CHECK(k1 < k2 && k2 < k4);   // monotone toward time priority
+}
+
+TEST(time_weighted_at_large_k_converges_to_fifo) {
+  auto run = [](Allocation a, int k) {
+    Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+           Book::kDefaultHotTicks, a, 40, k);
+    EventLog log;
+    b.submit(lim(1, Side::Sell, 10000, 20), log);
+    b.submit(lim(2, Side::Sell, 10000, 20), log);
+    b.submit(lim(3, Side::Sell, 10000, 50), log);
+    log.clear();
+    b.submit(lim(4, Side::Buy, 10000, 25), log);
+    return fills(log);
+  };
+  CHECK(run(Allocation::TimeWeighted, 32) == run(Allocation::Fifo, 1));
+}
+
+// CME's FIFO Exception, verbatim: "In the scenario where an aggressing order
+// quantity is greater than or equal to the displayed quantity in an instrument
+// at a given price level, for matching efficiency, CME Globex applies FIFO in
+// lieu of the designated product algorithm."
+TEST(an_order_sweeping_the_whole_level_fills_everything_under_every_policy) {
+  for (auto a : {Allocation::Fifo, Allocation::ProRata, Allocation::Split,
+                 Allocation::TimeWeighted}) {
+    Book b(kFloor, kCeil, SelfTradePolicy::None, 1u << 12,
+           Book::kDefaultHotTicks, a, 40, 2);
+    EventLog log;
+    b.submit(lim(1, Side::Sell, 10000, 20), log);
+    b.submit(lim(2, Side::Sell, 10000, 30), log);
+    b.submit(lim(3, Side::Sell, 10000, 50), log);
+    log.clear();
+    b.submit(lim(4, Side::Buy, 10000, 100), log);   // exactly the level total
+    Qty total = 0;
+    for (const auto& [id, q] : fills(log)) { (void)id; total += q; }
+    CHECK_EQ(total, 100);
+    CHECK_EQ(b.qty_at(Side::Sell, 10000), 0);
+  }
+}
+
 TEST(prorata_matches_the_reference_implementation) {
   // Same input, both engines, pro-rata. The full randomized version of this
   // lives in test_differential.cpp; this is the readable one.

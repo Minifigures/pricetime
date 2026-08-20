@@ -8,7 +8,7 @@ prices execute first; at the same price, whoever arrived first executes first.
 
 ```
 git clone https://github.com/Minifigures/pricetime && cd pricetime
-make test      # 62 tests, including ~400k-op differential fuzz
+make test      # 68 tests, including ~500k-op differential fuzz
 make bench     # latency percentiles across four flow regimes
 make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
@@ -244,9 +244,48 @@ and `split_at_0_percent_is_exactly_prorata` require the degenerate cases to
 produce byte-identical fills to the standalone policies. If they diverge, these
 are three unrelated code paths wearing one name.
 
-All three run the full differential fuzz, including Split across the whole
-percentage range, because allocation is the most intricate part of matching and
-unit tests passing is not sufficient reason to trust it.
+**Time-weighted**: one kernel that covers five published exchange algorithms.
+Sorting a level by time, with `Q_j` the cumulative volume from order *j* onward
+and `V = Q_1`:
+
+```
+f_j(k) = (Q_j^k  -  Q_{j+1}^k) / V^k
+```
+
+| k | what it is |
+|---|---|
+| 1 | pure pro-rata (CME `C`, Eurex Pro-Rata) |
+| 2 | Eurex Time-Pro-Rata, **and** ICE Euribor / SARON / SONIA / SOFR |
+| 4 | ICE Short Sterling and Euroswiss |
+| large | price-time FIFO |
+
+The Eurex identity is not obvious and is the nicest part: Eurex publishes
+Time-Pro-Rata as a recursion, `a_i = min(q_i, A_i(1 - (1 - q_i/Q_i)^2))`.
+Expanding by induction gives `A(Q_i^2 - Q_{i+1}^2)/V^2` — this kernel at k=2.
+Two exchanges documenting the same algorithm in two notations.
+
+Measured on Eurex's own published Example 7-7 (20, 20, 50 in time order,
+aggressor 25), oldest order's fill:
+
+```
+k=1   7   pro-rata, size wins
+k=2  11   Eurex TPR / ICE Euribor
+k=4  17   ICE Short Sterling, much closer to FIFO
+k=32 20   FIFO exactly
+```
+
+**CME's FIFO Exception** is implemented too: when an aggressor takes a whole
+price level, FIFO applies in place of the configured algorithm. The outcome is
+identical either way since everything fills, so this is purely about not doing
+proportional arithmetic that cannot change the answer.
+
+All four policies run the full differential fuzz, across the Split percentage
+range and the time-weight exponents, because allocation is the most intricate
+part of matching and unit tests passing is not sufficient reason to trust it.
+That is not hypothetical: the time-weighted kernel initially computed correct
+allocations and then discarded them, because the emit loop sat inside the
+pro-rata branch. It silently ran as FIFO and **every existing test still
+passed**. The differential campaign is what found it.
 
 ---
 
@@ -264,9 +303,9 @@ levels of depth per side).
 
 **Coverage: 100,000 randomized operations** across three self-trade policies and
 26 seeded campaigns, plus 23 hand-written behavioural tests, 11 consolidation
-tests, 5 sharding tests, 6 journal and recovery tests, and 8 allocation tests.
-The differential campaigns run under FIFO, pro-rata, and split across five
-FIFO percentages. The NBBO is separately fuzzed across four venues against an independent
+tests, 5 sharding tests, 6 journal and recovery tests, and 12 allocation tests.
+The differential campaigns run under FIFO, pro-rata, split across five FIFO
+percentages, and the time-weighted kernel across five exponents. The NBBO is separately fuzzed across four venues against an independent
 naive walk of every level of every venue.
 
 Two details borrowed from better engineers:
@@ -704,9 +743,12 @@ one.
 - **No ingress sequencing.** Sharded replay is batch: messages are partitioned
   up front. A live venue must establish total order at ingress, which is the
   single-writer bottleneck every exchange architecture is organised around.
-- **Three allocation models, not ten.** FIFO, pro-rata and CME's configurable
-  split are implemented. Still missing: top-order priority, Lead Market Maker
-  allocations, threshold minimums, and the leveling step.
+- **Four allocation models, not ten.** FIFO, pro-rata, CME's configurable
+  split, and the time-weighted kernel. Still missing: top-order priority (with
+  its TOP Min / TOP Max / TOP % parameters), Lead Market Maker allocations,
+  pro-rata minimums, and CME's leveling step. Also unimplemented: the LIFFE
+  *rank* family, which is a genuinely different profile from the power kernel
+  and should not be conflated with it.
 - **The order index is `std::unordered_map`.** Measured and found *not* to be
   the bottleneck, so it stays documented rather than optimized.
 - **Benchmarked on WSL2**, no core pinning, no isolated cores, no huge pages.

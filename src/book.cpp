@@ -1,14 +1,16 @@
 #include "pricetime/book.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace pricetime {
 
 Book::Book(Price floor_px, Price ceil_px, SelfTradePolicy stp,
            std::size_t expected_orders, Price hot_ticks, Allocation alloc,
-           int fifo_percent)
+           int fifo_percent, int time_weight)
     : floor_(floor_px), ceil_(ceil_px), stp_(stp), alloc_(alloc),
-      fifo_pct_(std::clamp(fifo_percent, 0, 100)) {
+      fifo_pct_(std::clamp(fifo_percent, 0, 100)),
+      time_weight_(std::clamp(time_weight, 1, 32)) {
   // The hot ladder is centred on the accepted band and clamped to it. When the
   // accepted band is already small (the synthetic benchmarks, most tests) the
   // whole thing is hot and the cold tier never sees a level.
@@ -325,10 +327,17 @@ void Book::submit(const NewOrder& o, EventLog& out) {
       }
     }
 
-    // Proportional pass. Mirrors ReferenceBook::prorata_shares exactly; the
+    // CME's FIFO Exception: when the aggressor takes the whole level, FIFO is
+    // applied in place of the configured algorithm. Every resting order fills
+    // completely either way, so the outcome is identical and the proportional
+    // work is pure waste.
+    const bool sweeps_level = remaining >= L.total;
+
+    // Proportional pass. Mirrors the reference implementation exactly; the
     // differential fuzz across policies is what keeps them that way.
-    if ((alloc_ == Allocation::ProRata || alloc_ == Allocation::Split) &&
-        remaining > 0 && L.head != kNil) {
+    if ((alloc_ == Allocation::ProRata || alloc_ == Allocation::Split ||
+         alloc_ == Allocation::TimeWeighted) &&
+        remaining > 0 && L.head != kNil && !sweeps_level) {
       pr_nodes_.clear();
       pr_share_.clear();
       Qty total = 0;
@@ -340,7 +349,25 @@ void Book::submit(const NewOrder& o, EventLog& out) {
         if (self_match) { pr_share_.push_back(-1); }        // -1 marks skip
         else            { pr_share_.push_back(0); total += pool_[n].open; }
       }
-      if (total > 0) {
+      if (total > 0 && alloc_ == Allocation::TimeWeighted) {
+        // f_j(k) = (Q_j^k - Q_{j+1}^k) / V^k over the eligible suffix sums.
+        const std::size_t n = pr_nodes_.size();
+        pr_suffix_.assign(n + 1, 0.0L);
+        for (std::size_t k = n; k-- > 0;)
+          pr_suffix_[k] = pr_suffix_[k + 1] +
+              (pr_share_[k] < 0 ? 0.0L
+                                : static_cast<long double>(pool_[pr_nodes_[k]].open));
+        const long double V = pr_suffix_[0];
+        const long double Vk = std::pow(V, static_cast<long double>(time_weight_));
+        for (std::size_t k = 0; k < n; ++k) {
+          if (pr_share_[k] < 0) continue;
+          const long double a = std::pow(pr_suffix_[k],     static_cast<long double>(time_weight_));
+          const long double b = std::pow(pr_suffix_[k + 1], static_cast<long double>(time_weight_));
+          Qty q = static_cast<Qty>(((a - b) / Vk) * static_cast<long double>(remaining));
+          q = std::min(q, pool_[pr_nodes_[k]].open);
+          pr_share_[k] = q > 0 ? q : 0;
+        }
+      } else if (total > 0) {
         for (std::size_t k = 0; k < pr_nodes_.size(); ++k) {
           if (pr_share_[k] < 0) continue;
 #pragma GCC diagnostic push
@@ -351,6 +378,15 @@ void Book::submit(const NewOrder& o, EventLog& out) {
           q = std::min(q, pool_[pr_nodes_[k]].open);
           pr_share_[k] = q;
         }
+      }
+
+      // Emit, shared by every proportional policy. This loop used to sit
+      // INSIDE the pro-rata branch, so the time-weighted kernel computed its
+      // allocations correctly and then discarded them, silently degrading to
+      // FIFO. Every existing test still passed, because none of them ran the
+      // time-weighted policy yet. Shared computation belongs outside the
+      // branch that happened to be written first.
+      if (total > 0) {
         for (std::size_t k = 0; k < pr_nodes_.size() && remaining > 0; ++k) {
           if (pr_share_[k] <= 0) continue;
           const Idx n = pr_nodes_[k];

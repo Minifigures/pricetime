@@ -114,13 +114,20 @@ enum class SelfTradePolicy : std::uint8_t {
 //            pure rule is satisfactory: pure FIFO lets one large resting order
 //            block everyone behind it, and pure pro-rata rewards submitting
 //            size you never intend to fill.
-enum class Allocation : std::uint8_t { Fifo = 0, ProRata = 1, Split = 2 };
+//   TimeWeighted  The power kernel above, parameterised by k. Interpolates
+//                 continuously between pro-rata (k=1) and FIFO (k large),
+//                 which is how ICE and Eurex actually weight time against
+//                 size rather than choosing one.
+enum class Allocation : std::uint8_t {
+  Fifo = 0, ProRata = 1, Split = 2, TimeWeighted = 3
+};
 
 [[nodiscard]] constexpr const char* to_string(Allocation a) noexcept {
   switch (a) {
     case Allocation::Fifo:    return "FIFO";
     case Allocation::ProRata: return "PRO-RATA";
     case Allocation::Split:   return "SPLIT";
+    case Allocation::TimeWeighted: return "TIME-WEIGHTED";
   }
   return "?";
 }
@@ -129,6 +136,31 @@ enum class Allocation : std::uint8_t { Fifo = 0, ProRata = 1, Split = 2 };
 // 100 is equivalent to Fifo, 0 to ProRata. CME's own default on the contracts
 // that use it is 40.
 inline constexpr int kDefaultFifoPercent = 40;
+
+// Time-weighting exponent for Allocation::TimeWeighted.
+//
+// One kernel covers five published exchange algorithms. Sorting a level by
+// time and letting Q_j be the cumulative volume from order j onward with
+// V = Q_1, each order's share is
+//
+//     f_j(k) = (Q_j^k - Q_{j+1}^k) / V^k
+//
+// which telescopes to exactly 1, so no normalisation is needed. Then:
+//
+//   k = 1     pure pro-rata            (CME 'C', Eurex Pro-Rata)
+//   k = 2     Eurex Time-Pro-Rata, and ICE Euribor / SARON / SONIA / SOFR
+//   k = 4     ICE Short Sterling and Euroswiss (pre-Dec 2018)
+//   k -> inf  price-time FIFO
+//
+// The Eurex identity is not obvious and is worth stating: Eurex publishes
+// Time-Pro-Rata as a recursion, a_i = min(q_i, A_i * (1 - (1 - q_i/Q_i)^2)).
+// Expanding it by induction gives A * (Q_i^2 - Q_{i+1}^2) / V^2, which is this
+// kernel at k = 2. Two exchanges document the same algorithm in two notations.
+//
+// k is an integer here because every published value is, and because integer
+// exponentiation avoids the precision questions that make Eurex warn its own
+// implementers about arithmetic sensitivity.
+inline constexpr int kDefaultTimeWeight = 2;
 
 enum class RejectReason : std::uint8_t {
   None = 0,

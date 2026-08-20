@@ -32,9 +32,11 @@ class ReferenceBook {
  public:
   explicit ReferenceBook(SelfTradePolicy stp = SelfTradePolicy::None,
                          Allocation alloc = Allocation::Fifo,
-                         int fifo_percent = kDefaultFifoPercent) noexcept
+                         int fifo_percent = kDefaultFifoPercent,
+                         int time_weight = kDefaultTimeWeight) noexcept
       : stp_(stp), alloc_(alloc),
-        fifo_pct_(fifo_percent < 0 ? 0 : (fifo_percent > 100 ? 100 : fifo_percent)) {}
+        fifo_pct_(fifo_percent < 0 ? 0 : (fifo_percent > 100 ? 100 : fifo_percent)),
+        time_weight_(time_weight < 1 ? 1 : (time_weight > 32 ? 32 : time_weight)) {}
 
   void submit(const NewOrder& o, EventLog& out);
   void cancel(const CancelOrder& c, EventLog& out);
@@ -97,6 +99,7 @@ class ReferenceBook {
   SelfTradePolicy stp_ = SelfTradePolicy::None;
   Allocation      alloc_ = Allocation::Fifo;
   int             fifo_pct_ = kDefaultFifoPercent;
+  int             time_weight_ = kDefaultTimeWeight;
   Seq next_seq_ = 1;
 };
 

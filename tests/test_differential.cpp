@@ -78,10 +78,11 @@ std::size_t run_campaign(std::uint64_t seed, std::size_t ops,
                          SelfTradePolicy stp,
                          Price hot_ticks = Book::kDefaultHotTicks,
                          Allocation alloc = Allocation::Fifo,
-                         int fifo_pct = kDefaultFifoPercent) {
+                         int fifo_pct = kDefaultFifoPercent,
+                         int time_weight = kDefaultTimeWeight) {
   Rng rng(seed);
-  ReferenceBook ref(stp, alloc, fifo_pct);
-  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks, alloc, fifo_pct);
+  ReferenceBook ref(stp, alloc, fifo_pct, time_weight);
+  Book fast(kFloor, kCeil, stp, 1u << 16, hot_ticks, alloc, fifo_pct, time_weight);
 
   std::vector<OrderId> live;
   OrderId next_id = 1;
@@ -225,6 +226,26 @@ TEST(differential_split_across_the_percentage_range) {
     for (std::uint64_t seed = 700; seed <= 706; ++seed)
       CHECK_EQ(run_campaign(seed, 3000, SelfTradePolicy::None,
                             Book::kDefaultHotTicks, Allocation::Split, pct), 3000u);
+}
+
+// The campaign that would have caught the emit-loop bug. The time-weighted
+// kernel computed correct allocations and then discarded them because the emit
+// loop sat inside the pro-rata branch, so it silently ran as FIFO. Every other
+// test passed. A policy without a differential campaign is a policy nobody has
+// actually checked.
+TEST(differential_time_weighted_across_exponents) {
+  for (int k : {1, 2, 3, 4, 8})
+    for (std::uint64_t seed = 800; seed <= 806; ++seed)
+      CHECK_EQ(run_campaign(seed, 3000, SelfTradePolicy::None,
+                            Book::kDefaultHotTicks, Allocation::TimeWeighted,
+                            kDefaultFifoPercent, k), 3000u);
+}
+
+TEST(differential_time_weighted_with_self_trade_prevention) {
+  for (std::uint64_t seed = 900; seed <= 906; ++seed)
+    CHECK_EQ(run_campaign(seed, 3000, SelfTradePolicy::CancelResting,
+                          Book::kDefaultHotTicks, Allocation::TimeWeighted,
+                          kDefaultFifoPercent, 2), 3000u);
 }
 
 TEST(all_combinations_exercised) {
