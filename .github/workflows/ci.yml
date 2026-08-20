@@ -71,6 +71,7 @@ jobs:
         run: |
           em++ -O3 -std=c++20 -Iinclude \
             src/wasm_main.cpp src/book.cpp src/reference_book.cpp \
+            src/surveillance.cpp \
             -o /tmp/pricetime.js \
             -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
             -sMODULARIZE -sEXPORT_NAME=PricetimeModule -sALLOW_MEMORY_GROWTH
