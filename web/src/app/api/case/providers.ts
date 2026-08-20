@@ -68,8 +68,95 @@ function openaiish(
 }
 
 export const PROVIDERS: readonly Provider[] = [
-  // Anthropic. Not free, kept first only because it is what the project was
-  // written against; if the key is absent the list falls through.
+  // Free tiers first, deliberately. This runs on a public demo and the cost of
+  // a judge clicking the button should be zero.
+  //
+  // OpenRouter's :free variants need no card. The endpoint for this model
+  // reports is_moderated false, so there is no extra moderation layer over a
+  // prompt that necessarily uses words like spoofing and layering in their
+  // regulatory sense. reasoning.exclude keeps a reasoning model's scratchpad
+  // out of a compliance document.
+  {
+    name: "OpenRouter (GLM 5.2, free)",
+    envKey: "OPENROUTER_API_KEY",
+    request: (key, system, user) => ({
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      init: {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${key}`,
+          "HTTP-Referer": "https://pricetime-mu.vercel.app",
+          "X-Title": "pricetime",
+        },
+        body: JSON.stringify({
+          model: "z-ai/glm-5.2:free",
+          stream: true,
+          temperature: 0.3,
+          reasoning: { exclude: true },
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      },
+    }),
+    delta: (frame) => {
+      const f = frame as { choices?: ReadonlyArray<{ delta?: { content?: string } }> };
+      return f.choices?.[0]?.delta?.content ?? null;
+    },
+  },
+
+  // Zhipu direct. GLM-4.7-Flash is priced at zero rather than being trial
+  // credit, so it does not run out. Different vendor, so it survives an
+  // OpenRouter outage. thinking disabled for the same reason as above.
+  {
+    name: "Z.ai (GLM 4.7 Flash, free)",
+    envKey: "ZAI_API_KEY",
+    request: (key, system, user) => ({
+      url: "https://api.z.ai/api/paas/v4/chat/completions",
+      init: {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${key}`,
+          "accept-language": "en-US,en",
+        },
+        body: JSON.stringify({
+          model: "glm-4.7-flash",
+          stream: true,
+          temperature: 0.3,
+          max_tokens: 900,
+          thinking: { type: "disabled" },
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      },
+    }),
+    delta: (frame) => {
+      // Only content. A reasoning model may also emit reasoning_content, and
+      // that is a scratchpad, not part of the case note.
+      const f = frame as {
+        choices?: ReadonlyArray<{ delta?: { content?: string } }>;
+      };
+      return f.choices?.[0]?.delta?.content ?? null;
+    },
+  },
+
+  // Hugging Face's router, kept as a third vendor. Its free allowance is about
+  // ten cents a month, which is enough to answer a judge and not enough to
+  // develop against, so it sits below the two that are actually free.
+  openaiish(
+    "Hugging Face router",
+    "HF_TOKEN",
+    "https://router.huggingface.co/v1/chat/completions",
+    "openai/gpt-oss-120b:cheapest",
+  ),
+
+  // Anthropic. Last because it is the only one here that costs money, so it
+  // is used only when nothing free is configured.
   {
     name: "Anthropic",
     envKey: "ANTHROPIC_API_KEY",
