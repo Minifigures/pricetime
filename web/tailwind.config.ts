@@ -25,6 +25,7 @@ const config: Config = {
         bidLit: "var(--bid-lit)",
         askLit: "var(--ask-lit)",
         signal: "var(--signal)",
+        signalLit: "var(--signal-lit)",
       },
     },
   },

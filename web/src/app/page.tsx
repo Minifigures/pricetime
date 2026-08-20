@@ -17,6 +17,8 @@ const EVIDENCE: ReadonlyArray<readonly [string, string, string, string]> = [
    "The engine replays 50,163,616 real orders from one trading day at a live US exchange, reconstructs what must have happened, and checks itself. For Apple: 1,499 of 1,499 executions matched exactly."],
   ["16,807", "crash points, all recovered", "Killed at every possible instant",
    "Every input is journalled before it is applied, so the inputs are the state. The process was killed at all 16,807 byte offsets in the journal; 16,406 of those cuts landed mid-record. All recovered to byte-identical state."],
+  ["1", "model, kept out of the engine", "A language model reads the output, never the book",
+   "Market abuse detectors run in C++ on the same event stream the engine emits, and their findings are deterministic. A language model then writes the compliance case note from those findings, in a separate process, told it may not invent a figure. It is not allowed near a matching decision, a price, or a fill, because an engine has to give the same answer every time and a model does not."],
   ["4x", "wrong, and left in the README", "Wrong guesses left in",
    "A prediction about which workload would be slowest turned out to be the fastest by four times. It stayed in the README. A refuted prediction is worth as much as a confirmed one."],
 ];

@@ -25,6 +25,8 @@
   --bid-lit:    #45C489;   /* inside the instrument */
   --ask-lit:    #FF6F61;
   --signal:     #B26B00;   /* used once, for the proof counter */
+  /* The same signal, lifted enough to read on the instrument's near-black. */
+  --signal-lit: #D99C3F;
 
   color-scheme: light;
 }

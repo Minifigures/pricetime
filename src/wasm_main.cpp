@@ -24,12 +24,14 @@
 
 #include "pricetime/book.hpp"
 #include "pricetime/reference_book.hpp"
+#include "pricetime/surveillance.hpp"
 
 using namespace pricetime;
 
 namespace {
 
 constexpr Price kFloor = 9'000, kCeil = 11'000, kMid = 10'000;
+constexpr ParticipantId kSpoofer = 9;
 
 // Same xorshift64* the native benchmarks use, so the browser and the terminal
 // produce the same sequence from the same seed.
@@ -67,6 +69,21 @@ struct Sim {
   double last_ns = 0.0;
   std::vector<std::pair<Price, Qty>> tape;
   std::string json;
+
+  // Market abuse surveillance, running on the same event stream the engine
+  // emits. The detectors are deterministic and live in C++; the narrative
+  // stage that reads their output is a separate process on purpose, because a
+  // language model must never sit anywhere near a matching decision.
+  Surveillance surv{"DEMO"};
+  Nanos ts = 0;
+
+  // A participant that quotes to move the price and pulls before anyone can
+  // trade with it. This is the pattern behind the 2010 flash crash prosecution
+  // and the Dodd-Frank spoofing statute: real intent is not observable, so
+  // surveillance looks for the signature, which is size posted away from the
+  // touch and withdrawn faster than anyone could reasonably respond.
+  OrderId spoof_id = 0;
+  int     spoof_age = 0;
 };
 
 Sim& sim() { static Sim s; return s; }
@@ -98,6 +115,8 @@ EMSCRIPTEN_KEEPALIVE void pt_reset(int seed) {
   s.rng = Rng(static_cast<std::uint64_t>(seed));
   s.live.clear(); s.next_id = 1; s.drift = kMid;
   s.msgs = s.trades = s.rejects = 0; s.vol = 0; s.tape.clear();
+  s.surv = Surveillance("DEMO");
+  s.ts = 0; s.spoof_id = 0; s.spoof_age = 0;
 }
 
 // Applies `n` messages and returns nothing; call pt_snapshot() to read state.
@@ -111,6 +130,35 @@ EMSCRIPTEN_KEEPALIVE void pt_step(int n) {
     log.clear();
     rlog.clear();
     s.drift = std::clamp<Price>(s.drift + s.rng.in(-1, 1), kFloor + 50, kCeil - 50);
+
+    // Pull the spoof one message after it rests, which is 50 us later and so
+    // inside the fleeting window the detector watches.
+    if (s.spoof_id != 0 && ++s.spoof_age >= 1) {
+      const CancelOrder cx{s.spoof_id, kSpoofer};
+      s.book.cancel(cx, log);
+      s.ref.cancel(cx, rlog);
+      s.spoof_id = 0;
+      s.spoof_age = 0;
+      goto compare;                        // this message was the cancel
+    }
+    if (s.rng.in(1, 100) <= 4) {           // plant a fresh one
+      NewOrder sp;
+      sp.id = s.next_id++;
+      sp.owner = kSpoofer;
+      sp.side = s.rng.in(0, 1) == 0 ? Side::Buy : Side::Sell;
+      sp.type = OrderType::Limit;
+      sp.tif  = TimeInForce::Day;
+      const std::int64_t away = s.rng.in(2, 5);
+      sp.price = (sp.side == Side::Buy) ? s.drift - away : s.drift + away;
+      sp.price = std::clamp<Price>(sp.price, kFloor, kCeil);
+      sp.qty = s.rng.in(400, 900);         // conspicuously large
+      s.book.submit(sp, log);
+      s.ref.submit(sp, rlog);
+      s.spoof_id = sp.id;
+      s.spoof_age = 0;
+      goto compare;
+    }
+
     if (!s.live.empty() && s.rng.in(1, 100) <= 40) {
       const auto i = static_cast<std::size_t>(
           s.rng.in(0, static_cast<std::int64_t>(s.live.size()) - 1));
@@ -122,6 +170,7 @@ EMSCRIPTEN_KEEPALIVE void pt_step(int n) {
     } else {
       NewOrder o;
       o.id = s.next_id++;
+      o.owner = static_cast<ParticipantId>(s.rng.in(1, 4));
       o.side = s.rng.in(0, 1) == 0 ? Side::Buy : Side::Sell;
       o.type = OrderType::Limit;
       const bool agg = s.rng.in(1, 100) <= 18;
@@ -135,7 +184,10 @@ EMSCRIPTEN_KEEPALIVE void pt_step(int n) {
       s.ref.submit(o, rlog);
       if (!agg) s.live.push_back(o.id);
     }
+  compare:
     ++s.msgs;
+    s.ts += 50'000;                       // 50 us between messages
+    for (const Event& e : log) s.surv.observe(e, s.ts);
 
     // Compare the two streams event for event, exactly as the differential
     // test does natively. A mismatch here would mean the engine in this
@@ -166,6 +218,15 @@ EMSCRIPTEN_KEEPALIVE void pt_step(int n) {
   // magnitude indication only; the real measurements are native and live in
   // the README.
   if (n > 0) s.last_ns = (t1 - t0) * 1e6 / static_cast<double>(n);
+}
+
+// The deterministic surveillance output, as JSON. Kept separate from the
+// depth snapshot because it changes far more slowly and is much larger.
+EMSCRIPTEN_KEEPALIVE const char* pt_findings() {
+  Sim& s = sim();
+  static std::string out;
+  out = s.surv.findings_json();
+  return out.c_str();
 }
 
 EMSCRIPTEN_KEEPALIVE const char* pt_snapshot() {

@@ -18,6 +18,19 @@ interface Snapshot {
   readonly last: string;
 }
 
+interface Finding {
+  readonly alert: string;
+  readonly severity: number;
+  readonly count: number;
+  readonly detail: string;
+  readonly basis: string;
+}
+interface Findings {
+  readonly symbol: string;
+  readonly stats: Record<string, number>;
+  readonly findings: readonly Finding[];
+}
+
 interface EngineModule {
   readonly ccall: (
     n: string, r: string | null, a: readonly string[], v: readonly unknown[],
@@ -62,6 +75,9 @@ export function EnginePanel(): React.JSX.Element {
   // Which side, and how deep, the pointer is resting. A book is only useful if
   // you can ask what taking it would cost.
   const [sweep, setSweep] = useState<{ side: "bid" | "ask"; row: number } | null>(null);
+  const [surv, setSurv] = useState<Findings | null>(null);
+  const [note, setNote] = useState<string>("");
+  const [writing, setWriting] = useState(false);
 
   useEffect(() => {
     const el = shell.current;
@@ -101,6 +117,54 @@ export function EnginePanel(): React.JSX.Element {
     const raw = m.ccall("pt_snapshot", "string", [], []);
     if (typeof raw === "string") setSnap(JSON.parse(raw) as Snapshot);
   }, []);
+
+  // Findings move far more slowly than depth and the payload is bigger, so
+  // they get their own, slower cadence rather than riding the 90ms tick.
+  useEffect(() => {
+    if (!ready || !running || !onscreen) return;
+    const read = (): void => {
+      const m = mod.current;
+      if (!m) return;
+      const raw = m.ccall("pt_findings", "string", [], []);
+      if (typeof raw === "string") {
+        try { setSurv(JSON.parse(raw) as Findings); } catch { /* mid-write */ }
+      }
+    };
+    read();
+    const id = window.setInterval(read, 1500);
+    return () => window.clearInterval(id);
+  }, [ready, running, onscreen]);
+
+  const writeCase = useCallback(async (): Promise<void> => {
+    if (!surv || surv.findings.length === 0) return;
+    setWriting(true);
+    setNote("");
+    try {
+      const res = await fetch("/api/case", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          symbol: surv.symbol,
+          stats: surv.stats,
+          findings: surv.findings,
+          book: { bid: snap.bid, ask: snap.ask, spread: snap.ask - snap.bid },
+        }),
+      });
+      const body = res.body;
+      if (!body) { setNote("no response from the narrative stage"); return; }
+      const reader = body.getReader();
+      const dec = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        setNote((prev) => prev + dec.decode(value, { stream: true }));
+      }
+    } catch (e) {
+      setNote(`the narrative stage failed: ${String(e)}`);
+    } finally {
+      setWriting(false);
+    }
+  }, [surv, snap.bid, snap.ask]);
 
   useEffect(() => {
     if (!ready || !running || !onscreen) return;
@@ -321,6 +385,60 @@ export function EnginePanel(): React.JSX.Element {
       </div>
 
       {/* The engine's actual output, unedited. */}
+      {/* Surveillance. The detectors are deterministic C++ on the same event
+          stream; the case note beneath them is a language model, kept in a
+          separate process because it must never touch a matching decision. */}
+      <div className="border-t border-instRule px-6 py-5 sm:px-8">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+          <div className="clause !text-instInk/35">
+            surveillance, on the same event stream
+          </div>
+          {surv && surv.findings.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void writeCase()}
+              disabled={writing}
+              className="font-mono text-[11px] uppercase tracking-[0.18em] text-signalLit underline underline-offset-4 disabled:opacity-40"
+            >
+              {writing ? "writing" : "have an analyst write it up"}
+            </button>
+          )}
+        </div>
+
+        {(!surv || surv.findings.length === 0) && (
+          <p className="mt-3 font-mono text-[13px] text-instInk/40">
+            nothing flagged yet
+          </p>
+        )}
+
+        {surv && surv.findings.length > 0 && (
+          <div className="mt-4 space-y-3">
+            {surv.findings.map((f) => (
+              <div key={f.alert} className="grid gap-1 sm:grid-cols-[13rem_1fr] sm:gap-6">
+                <div className="font-mono text-[13px] text-signalLit">
+                  {f.alert.toLowerCase().replace(/_/g, " ")}
+                  <span className="tnum ml-2 text-instInk/40">x{f.count.toLocaleString()}</span>
+                </div>
+                <div>
+                  <div className="text-[13px] leading-snug text-instInk/75">{f.detail}</div>
+                  <div className="mt-1 font-mono text-[11px] text-instInk/35">{f.basis}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {note !== "" && (
+          <div className="mt-5 border-l border-instRule pl-4">
+            <div className="clause !text-instInk/35">case note</div>
+            <p className="mt-2 whitespace-pre-wrap text-[13px] leading-relaxed text-instInk/80">
+              {note}
+              {writing && <span className="ml-0.5 animate-pulse text-signalLit">|</span>}
+            </p>
+          </div>
+        )}
+      </div>
+
       <div className="border-t border-instRule px-6 py-4 sm:px-8">
         <div className="clause !text-instInk/35">last event emitted</div>
         <div className="mt-1 overflow-x-auto whitespace-pre font-mono text-[11px] text-instInk/70">
