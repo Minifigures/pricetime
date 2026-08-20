@@ -14,6 +14,7 @@ make shardbench # throughput vs shard count
 make tsan      # ThreadSanitizer over the concurrent paths
 make replay    # live terminal order book
 make recover   # journal, crash, recover, prove it
+./scripts/feed_crypto.py 60 | ./build/pricetime_nbbo   # live 3-venue NBBO
 ./scripts/fetch_iex.sh && ./build/pricetime_iex data/iex/20241223_DPLS.pcap.gz AAPL
 ```
 
@@ -363,10 +364,61 @@ speed, and the Commission believes that Rule 611 has contributed to this."*
 There are now 17 operating equity exchanges, up from 8 in 2005, and the
 trade-through rate the rule polices is under 2.5%.
 
-**Honest limitation:** only one real venue feed is wired up. The consolidator is
-exercised by differential fuzz across four *synthetic* venues, not four real
-ones. Aligning two real US venues requires order-by-order feeds for the same
-date, and the free Nasdaq samples do not overlap the IEX DEEP+ archive.
+### Running it on three real exchanges
+
+```
+./scripts/feed_crypto.py 60 | ./build/pricetime_nbbo
+```
+
+Crypto rather than equities, for a specific reason: a genuine cross-venue NBBO
+needs two or more venues quoting **the same instrument at the same time**, and
+the free US order-by-order archives do not overlap. IEX DEEP+ starts
+2024-10-01; the free Nasdaq ITCH samples are 2019 and 2025-26. Crypto exchanges
+all quote BTC/USD concurrently, without authentication.
+
+| venue | role |
+|---|---|
+| **Bitstamp** | order-by-order. Individual orders with exchange IDs, so the book is rebuilt and its BBO derived from reconstructed depth. This is the one that exercises the matching engine. |
+| **Coinbase** | top of book only |
+| **Kraken** | top of book only |
+
+The display labels which venues are reconstructed and which are quotes. Claiming
+depth that was never sent is the easy lie here. Binance is deliberately excluded:
+its liquid pair is BTC/**USDT**, a different instrument, and folding it into a
+USD consolidated quote would be wrong in a way that is invisible on screen.
+
+### Two bugs this found, both caught by checking against the venues' own tickers
+
+**A live L3 subscription is not enough on its own.** Subscribing mid-session
+only shows orders created *after* connecting, so the reconstructed book holds a
+fraction of real depth. Measured: that partial book showed a **$2.21 spread
+while Coinbase showed $0.01**, and the consolidator then reported thousands of
+crossed markets that were pure artifact. Fixed with snapshot-plus-deltas in the
+correct order: subscribe and buffer first, then fetch the snapshot, seed from
+it, then replay buffered deltas newer than the snapshot's timestamp. Doing the
+snapshot first would silently drop everything in the gap.
+
+**A stale quote does not look stale, it looks like an arbitrage.** Kraken's
+ticker channel published 8 times in 30 seconds, leaving its quote 20 seconds old
+and $18 from the others. The consolidator dutifully found free money that did
+not exist. Moved to the book channel (1,031 updates in the same window) and
+added quote ageing on top, which is exactly why real consolidated feeds carry
+per-participant timestamps.
+
+### What is deliberately not claimed
+
+The tool reports counts of inverted and flagged quotes, and then says in its own
+output that **they are not a finding**. Crypto venues have no trade-through
+rule, no consolidated tape, and no shared clock, and arbitrage between them is
+bounded by transfer latency and pre-positioned capital, so an inverted
+consolidated quote is ordinary rather than a violation.
+
+More decisively, the venues publish at wildly different rates: **14,893 messages
+from Bitstamp against 370 from Coinbase** in one 35-second capture. Any
+instantaneous cross-venue comparison is dominated by which venue published most
+recently. The NBBO itself is real; those counters mostly measure update-rate
+asymmetry, and a headline number that would not survive scrutiny is worth less
+than saying so.
 
 ---
 
@@ -586,6 +638,7 @@ one.
 | `make shardbench` | Throughput against shard count |
 | `make replay` | Live terminal order book |
 | `make recover` | Journal a run, crash it, recover, verify against a live replay |
+| `make nbbo` | Build the live cross-venue consolidator |
 | `./scripts/fetch_iex.sh` | Download a real trading day (~1.7 GB) |
 
 Requires g++ 13+ and make. Warning set is `-Wall -Wextra -Wpedantic -Wshadow
