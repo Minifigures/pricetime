@@ -68,6 +68,56 @@ function openaiish(
 }
 
 export const PROVIDERS: readonly Provider[] = [
+  // Google AI Studio. Free with no card and the shortest path to a key, so it
+  // goes first. Not OpenAI-shaped: systemInstruction is a top level sibling of
+  // contents rather than a message, roles are user and model rather than user
+  // and assistant, and the text arrives under candidates[].content.parts[].
+  //
+  // alt=sse is load bearing. Without it the endpoint streams a progressively
+  // emitted JSON array instead of server-sent events, and a line-oriented
+  // parser reads exactly nothing from it.
+  {
+    name: "Gemini (free)",
+    envKey: "GEMINI_API_KEY",
+    request: (key, system, user) => ({
+      url:
+        "https://generativelanguage.googleapis.com/v1beta/models/" +
+        "gemini-3.5-flash-lite:streamGenerateContent?alt=sse",
+      init: {
+        method: "POST",
+        // The key goes in a header, not the documented ?key= query parameter,
+        // which would put it in request logs.
+        headers: { "content-type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ role: "user", parts: [{ text: user }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 900 },
+          // A compliance note about layering and spoofing is exactly the sort
+          // of wording a general-purpose filter misreads. These categories are
+          // irrelevant to the task and blocking on them would silently return
+          // an empty document.
+          safetySettings: [
+            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
+            { category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
+            { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
+            { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
+          ],
+        }),
+      },
+    }),
+    delta: (frame) => {
+      const f = frame as {
+        candidates?: ReadonlyArray<{
+          content?: { parts?: ReadonlyArray<{ text?: string; thought?: boolean }> };
+        }>;
+      };
+      const parts = f.candidates?.[0]?.content?.parts ?? [];
+      // Skip reasoning parts: a scratchpad is not part of a case note.
+      const text = parts.filter((x) => x.thought !== true).map((x) => x.text ?? "").join("");
+      return text === "" ? null : text;
+    },
+  },
+
   // Free tiers first, deliberately. This runs on a public demo and the cost of
   // a judge clicking the button should be zero.
   //

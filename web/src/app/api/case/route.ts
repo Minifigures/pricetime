@@ -15,7 +15,13 @@
 
 import { pick } from "./providers";
 
-export const runtime = "edge";
+// Node, not Edge. Edge imposes a hard 25 second deadline on time to first
+// byte, and a model that thinks before it answers can exceed that, which would
+// truncate the case note rather than fail visibly. Edge is also on its way out
+// of Next.js. Node has no first-byte deadline and streams the same way.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 interface Finding {
   readonly alert: string;
