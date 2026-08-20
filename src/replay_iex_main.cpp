@@ -122,9 +122,12 @@ int main(int argc, char** argv) {
   std::printf("  file            : %s\n", path.c_str());
   std::printf("  packets         : %llu\n",
               static_cast<unsigned long long>(rd.packets()));
-  std::printf("  order messages  : %llu decoded, %llu skipped (auction/system)\n",
+  std::printf("  order messages  : %llu decoded, %llu skipped (auction/system)",
               static_cast<unsigned long long>(rd.messages()),
               static_cast<unsigned long long>(rd.skipped()));
+  if (rd.malformed() > 0)
+    std::printf(", %llu MALFORMED", static_cast<unsigned long long>(rd.malformed()));
+  std::printf("\n");
   std::printf("  decode rate     : %.2f M msg/sec (gunzip + pcap + IEX-TP)\n",
               static_cast<double>(rd.messages()) / decode_secs / 1e6);
   std::printf("  symbols seen    : %zu\n", per_symbol.size());

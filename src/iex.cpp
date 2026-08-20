@@ -11,6 +11,16 @@ namespace {
 // Packet payloads are not guaranteed aligned, and a misaligned load is
 // undefined behaviour that happens to work on x86 right up until it does not.
 // The compiler folds these to a single mov at -O2.
+// Prices come straight out of the file, so they are whatever bytes happen to
+// be there. types.hpp reserves headroom (kMaxPrice is INT64_MAX/4) precisely
+// so downstream arithmetic on a price cannot overflow, and a raw field of
+// INT64_MAX defeats that: replay_iex_main widens the observed range by a pad
+// and that addition is signed overflow, which is undefined behaviour in a
+// -O3 -DNDEBUG build where the compiler may assume it cannot happen.
+[[nodiscard]] inline bool plausible_price(std::int64_t v) noexcept {
+  return v >= kMinPrice && v <= kMaxPrice;
+}
+
 template <class T>
 [[nodiscard]] T le(const char* p) noexcept {
   T v;
@@ -248,7 +258,7 @@ bool DeepPlusReader::next(Decoded& out) {
     // the order ID.
     switch (t) {
       case 'a': {
-        if (len < 38) { ++skipped_; continue; }
+        if (len < 38) { ++malformed_; continue; }
         out.type     = MsgType::AddOrder;
         out.side     = (m[1] == '8') ? Side::Buy : Side::Sell;
         out.ts       = le<std::int64_t>(m + 2);
@@ -257,12 +267,13 @@ bool DeepPlusReader::next(Decoded& out) {
         out.order_id = le<std::uint64_t>(m + 18);
         out.size     = static_cast<Qty>(le<std::uint32_t>(m + 26));
         out.price    = le<std::int64_t>(m + 30);
+        if (!plausible_price(out.price)) { ++malformed_; continue; }
         out.maintain_priority = false;
         ++messages_;
         return true;
       }
       case 'M': {
-        if (len < 38) { ++skipped_; continue; }
+        if (len < 38) { ++malformed_; continue; }
         out.type = MsgType::OrderModify;
         // Bit 0: 0 = Reset Priority, 1 = Maintain Priority. The venue tells us
         // outright whether the modify keeps queue position, so the engine
@@ -274,11 +285,12 @@ bool DeepPlusReader::next(Decoded& out) {
         out.order_id = le<std::uint64_t>(m + 18);
         out.size     = static_cast<Qty>(le<std::uint32_t>(m + 26));
         out.price    = le<std::int64_t>(m + 30);
+        if (!plausible_price(out.price)) { ++malformed_; continue; }
         ++messages_;
         return true;
       }
       case 'R': {
-        if (len < 26) { ++skipped_; continue; }
+        if (len < 26) { ++malformed_; continue; }
         out.type = MsgType::OrderDelete;
         out.ts   = le<std::int64_t>(m + 2);
         std::memcpy(out.symbol.c, m + 10, 8);
@@ -290,7 +302,7 @@ bool DeepPlusReader::next(Decoded& out) {
         return true;
       }
       case 'L': {
-        if (len < 38) { ++skipped_; continue; }
+        if (len < 38) { ++malformed_; continue; }
         out.type = MsgType::OrderExecuted;
         out.ts   = le<std::int64_t>(m + 2);
         std::memcpy(out.symbol.c, m + 10, 8);
@@ -298,6 +310,7 @@ bool DeepPlusReader::next(Decoded& out) {
         out.order_id = le<std::uint64_t>(m + 18);
         out.size     = static_cast<Qty>(le<std::uint32_t>(m + 26));
         out.price    = le<std::int64_t>(m + 30);
+        if (!plausible_price(out.price)) { ++malformed_; continue; }
         ++messages_;
         return true;
       }

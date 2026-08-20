@@ -287,3 +287,36 @@ TEST(all_combinations_exercised) {
     CHECK(g_seen_combos.count(want) == 1);
   }
 }
+
+// Filling the matrix. Allocation policy and self-trade policy were each
+// fuzzed, but only along one axis at a time: of the twelve
+// allocation-by-STP combinations, four never ran, and the cold tier had only
+// ever been fuzzed under FIFO. Those are exactly the cells where a future
+// refactor would land unobserved, since every individual axis would still be
+// green. Nothing here failed on the first run; the point is that from now on
+// it cannot start failing quietly.
+TEST(differential_every_allocation_under_every_stp) {
+  constexpr SelfTradePolicy kStps[] = {SelfTradePolicy::None,
+                                       SelfTradePolicy::CancelResting,
+                                       SelfTradePolicy::CancelAggressor};
+  constexpr Allocation kAllocs[] = {Allocation::Fifo, Allocation::ProRata,
+                                    Allocation::Split, Allocation::TimeWeighted};
+  std::uint64_t seed = 900;
+  for (SelfTradePolicy stp : kStps)
+    for (Allocation alloc : kAllocs)
+      CHECK_EQ(run_campaign(seed++, 2000, stp, Book::kDefaultHotTicks, alloc),
+               2000u);
+}
+
+// And the same matrix with the cold ordered-map tier carrying almost every
+// level, since merging two tiers in price order is what allocation reads to
+// decide who fills.
+TEST(differential_every_allocation_on_the_cold_tier) {
+  constexpr Allocation kAllocs[] = {Allocation::ProRata, Allocation::Split,
+                                    Allocation::TimeWeighted};
+  std::uint64_t seed = 950;
+  for (Allocation alloc : kAllocs)
+    for (SelfTradePolicy stp : {SelfTradePolicy::None,
+                                SelfTradePolicy::CancelResting})
+      CHECK_EQ(run_campaign(seed++, 2000, stp, 64, alloc), 2000u);
+}

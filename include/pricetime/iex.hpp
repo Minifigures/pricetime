@@ -97,6 +97,12 @@ class DeepPlusReader {
   [[nodiscard]] std::uint64_t packets()  const noexcept { return packets_; }
   [[nodiscard]] std::uint64_t messages() const noexcept { return messages_; }
   [[nodiscard]] std::uint64_t skipped()  const noexcept { return skipped_; }
+  // Kept apart from skipped(): one counts message types this decoder does not
+  // model (auction, system status), which is normal traffic, and the other
+  // counts messages that were structurally wrong. Reporting them as one number
+  // labelled "auction/system" lets a corrupt file inflate a figure an operator
+  // reads as routine.
+  [[nodiscard]] std::uint64_t malformed() const noexcept { return malformed_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
   // True when the stream ended in the middle of a record, or when the
@@ -126,6 +132,7 @@ class DeepPlusReader {
   std::uint64_t packets_  = 0;
   std::uint64_t messages_ = 0;
   std::uint64_t skipped_  = 0;
+  std::uint64_t malformed_ = 0;
 };
 
 }  // namespace pricetime::iex
