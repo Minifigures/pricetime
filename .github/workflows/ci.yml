@@ -81,7 +81,7 @@ jobs:
       # This job's job is to prove src/wasm_main.cpp still compiles.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.22.1'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install
